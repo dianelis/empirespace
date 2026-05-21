@@ -1,0 +1,91 @@
+name: Daily Scrape
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-scrape-pages
+  cancel-in-progress: false
+
+jobs:
+  scrape-build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper
+        run: |
+          python crawl_jobs.py \
+            --input data/companies.csv \
+            --output jobs_out.csv \
+            --log crawl_log.csv \
+            --discovered-pages output/discovered_pages.csv \
+            --failed-companies output/failed_companies.csv \
+            --timeout 15 \
+            --retries 2 \
+            --backoff 0.5 \
+            --sleep 0.2 \
+            --max-pages-per-company 12
+
+      - name: Update client CSV data
+        run: |
+          mkdir -p client/public/data
+          cp jobs_out.csv client/public/data/jobs_out.csv
+
+      - name: Commit refreshed CSV
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/public/data/jobs_out.csv
+          if git diff --cached --quiet; then
+            echo "No CSV changes to commit."
+          else
+            git commit -m "Refresh jobs data"
+            git push origin HEAD:main
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Build client
+        working-directory: client
+        run: npm run build
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

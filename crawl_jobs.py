@@ -15,11 +15,11 @@ from bs4 import BeautifulSoup
 
 from discover_jobs_pages import (
     DEFAULT_TIMEOUT,
+    ATS_HOST_HINTS,
     clean_text,
     create_session,
-    discover_careers_page,
     fetch_url,
-    find_careers_links,
+    get_site_root,
     is_http_url,
     is_linkedin_url,
     normalize_url,
@@ -49,31 +49,27 @@ OUTPUT_FIELDS = [
     "date_found",
     "last_seen_at",
     "source_url",
+    "discovery_method",
     "status",
 ]
 
 LOG_FIELDS = [
-    "checked_at",
-    "company_id",
     "company_name",
-    "company_website",
-    "url_checked",
-    "status",
-    "http_status",
-    "jobs_found",
+    "attempted_url",
+    "attempt_type",
+    "status_code",
+    "scraper_status",
     "error_message",
+    "timestamp",
 ]
 
 DISCOVERED_FIELDS = [
-    "checked_at",
-    "company_id",
     "company_name",
     "company_website",
-    "careers_url",
-    "source_url",
-    "status",
-    "http_status",
-    "notes",
+    "discovered_url",
+    "discovery_method",
+    "confidence_score",
+    "timestamp",
 ]
 
 FAILED_FIELDS = [
@@ -96,6 +92,8 @@ FAILURE_STATUSES = {
     "js_rendered_or_unsupported",
     "blocked",
     "unsupported_structure",
+    "careers_url_failed",
+    "fallback_url_failed",
 }
 
 JOB_TITLE_WORD_RE = re.compile(
@@ -154,6 +152,66 @@ JOB_URL_HINTS = (
     "myworkdayjobs.com/",
     "workdayjobs.com/",
     "tal.net/",
+    "breezy.hr/",
+    "adp.com/",
+    "ultipro.com/",
+    "ukg.com/",
+)
+
+FALLBACK_CAREER_PATHS = (
+    "/careers",
+    "/jobs",
+    "/careers/jobs",
+    "/join-us",
+    "/work-with-us",
+    "/open-positions",
+    "/opportunities",
+    "/company/careers",
+    "/about/careers",
+    "/team",
+)
+
+FALLBACK_LINK_TERMS = (
+    "careers",
+    "career",
+    "jobs",
+    "hiring",
+    "join",
+    "work with us",
+    "open positions",
+    "opportunities",
+    "greenhouse",
+    "lever",
+    "workable",
+    "ashby",
+    "breezy",
+    "smartrecruiters",
+)
+
+ATS_LINK_HOST_HINTS = tuple(
+    dict.fromkeys(
+        ATS_HOST_HINTS
+        + (
+            "boards.greenhouse.io",
+            "job-boards.greenhouse.io",
+            "lever.co",
+            "jobs.lever.co",
+            "ashbyhq.com",
+            "jobs.ashbyhq.com",
+            "workable.com",
+            "breezy.hr",
+            "smartrecruiters.com",
+            "recruitee.com",
+            "jazzhr.com",
+            "icims.com",
+            "jobvite.com",
+            "adp.com",
+            "workforcenow.adp.com",
+            "ultipro.com",
+            "ukg.com",
+            "bamboohr.com",
+        )
+    )
 )
 
 JS_HEAVY_HOST_HINTS = (
@@ -881,22 +939,22 @@ def dedupe_jobs(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
     for row in rows:
         key = canonicalize_url(row.get("job_url", ""))
-        title_key = "|".join(
-            [
-                clean_text(row.get("job_title", "")).lower(),
-                clean_text(row.get("location", "")).lower(),
-            ]
-        )
 
         if key and key in seen_urls:
             continue
-        if title_key.strip("|") and title_key in seen_titles:
-            continue
-
         if key:
             seen_urls.add(key)
-        if title_key.strip("|"):
-            seen_titles.add(title_key)
+        else:
+            title_key = "|".join(
+                [
+                    clean_text(row.get("job_title", "")).lower(),
+                    clean_text(row.get("location", "")).lower(),
+                ]
+            )
+            if title_key.strip("|") and title_key in seen_titles:
+                continue
+            if title_key.strip("|"):
+                seen_titles.add(title_key)
         out.append(row)
     return out
 
@@ -921,6 +979,7 @@ def make_status_row(
     careers_url: str,
     source_url: str,
     status: str,
+    discovery_method: str = "",
 ) -> Dict[str, str]:
     base = company_output_base(row, careers_url)
     location_fields = parse_location_fields("", row)
@@ -939,6 +998,7 @@ def make_status_row(
             "date_found": today_utc(),
             "last_seen_at": today_utc(),
             "source_url": source_url,
+            "discovery_method": discovery_method,
             "status": status,
         }
     )
@@ -947,45 +1007,37 @@ def make_status_row(
 
 def make_log_row(
     row: Dict[str, str],
-    url_checked: str,
-    status: str,
-    http_status: str = "",
+    attempted_url: str,
+    scraper_status: str,
+    status_code: str = "",
     jobs_found: int = 0,
     error_message: str = "",
+    attempt_type: str = "crawl",
 ) -> Dict[str, str]:
-    base = company_output_base(row, "")
     return {
-        "checked_at": now_iso(),
-        "company_id": base["company_id"],
-        "company_name": base["company_name"],
-        "company_website": base["company_website"],
-        "url_checked": url_checked,
-        "status": status,
-        "http_status": http_status,
-        "jobs_found": str(jobs_found),
+        "company_name": pick_company_name(row),
+        "attempted_url": attempted_url,
+        "attempt_type": attempt_type,
+        "status_code": str(status_code or ""),
+        "scraper_status": scraper_status,
         "error_message": error_message,
+        "timestamp": now_iso(),
     }
 
 
 def make_discovered_page_row(
     row: Dict[str, str],
-    careers_url: str,
-    source_url: str,
-    status: str,
-    http_status: str = "",
-    notes: str = "",
+    discovered_url: str,
+    discovery_method: str,
+    confidence_score: Any = "",
 ) -> Dict[str, str]:
-    base = company_output_base(row, careers_url)
     return {
-        "checked_at": now_iso(),
-        "company_id": base["company_id"],
-        "company_name": base["company_name"],
-        "company_website": base["company_website"],
-        "careers_url": careers_url,
-        "source_url": source_url,
-        "status": status,
-        "http_status": http_status,
-        "notes": notes,
+        "company_name": pick_company_name(row),
+        "company_website": pick_company_website(row),
+        "discovered_url": discovered_url,
+        "discovery_method": discovery_method,
+        "confidence_score": str(confidence_score),
+        "timestamp": now_iso(),
     }
 
 
@@ -1031,7 +1083,11 @@ def status_from_logs(log_rows: List[Dict[str, str]]) -> str:
     if not log_rows:
         return "no_jobs_found"
 
-    statuses = [row.get("status", "") for row in log_rows if row.get("status") != "redirect_detected"]
+    statuses = [
+        row.get("scraper_status") or row.get("status", "")
+        for row in log_rows
+        if (row.get("scraper_status") or row.get("status", "")) != "redirect_detected"
+    ]
     failure_statuses = {
         "invalid_url",
         "request_failed",
@@ -1041,10 +1097,387 @@ def status_from_logs(log_rows: List[Dict[str, str]]) -> str:
         "js_rendered_or_unsupported",
         "blocked",
         "unsupported_structure",
+        "careers_url_failed",
+        "fallback_url_failed",
     }
+    for status in ("no_jobs_found", "unsupported_structure", "js_rendered_or_unsupported"):
+        if status in statuses:
+            return status
+    for status in (
+        "invalid_url",
+        "timeout",
+        "blocked",
+        "non_html_response",
+        "parse_error",
+        "fallback_url_failed",
+        "careers_url_failed",
+        "request_failed",
+        "careers_page_not_found",
+    ):
+        if status in statuses:
+            return status
     if statuses and all(status in failure_statuses for status in statuses):
         return statuses[0] or "request_failed"
     return "no_jobs_found"
+
+
+def is_ats_url(url: str) -> bool:
+    return host_matches(url, ATS_LINK_HOST_HINTS)
+
+
+def should_retry_fetch(fetch_error: str) -> bool:
+    if fetch_error in {"timeout", "blocked", "redirect_detected"}:
+        return True
+    if fetch_error.startswith("request_failed"):
+        return True
+    return fetch_error in {"http_429", "http_500", "http_502", "http_503", "http_504"}
+
+
+def final_failure_status(discovery_method: str) -> str:
+    if discovery_method == "known_careers_url":
+        return "careers_url_failed"
+    return "fallback_url_failed"
+
+
+def record_discovered_page(
+    row: Dict[str, str],
+    discovered_rows: List[Dict[str, str]],
+    discovered_seen: set,
+    discovered_url: str,
+    discovery_method: str,
+    confidence_score: int,
+) -> None:
+    if discovery_method == "known_careers_url":
+        return
+
+    normalized = normalize_url(discovered_url)
+    if not normalized:
+        return
+
+    key = (company_dedupe_key(row), canonicalize_url(normalized), discovery_method)
+    if key in discovered_seen:
+        return
+    discovered_seen.add(key)
+    discovered_rows.append(
+        make_discovered_page_row(row, normalized, discovery_method, confidence_score)
+    )
+
+
+def add_candidate(
+    candidates: List[Dict[str, Any]],
+    seen_candidates: set,
+    url: str,
+    discovery_method: str,
+    confidence_score: int,
+    depth: int = 0,
+    attempt_type: str = "fallback",
+) -> bool:
+    normalized = normalize_url(url)
+    if not normalized:
+        return False
+    if is_linkedin_url(normalized) or host_matches(normalized, UNSUPPORTED_CAREER_HOST_HINTS):
+        return False
+
+    key = canonicalize_url(normalized)
+    if key in seen_candidates:
+        return False
+    seen_candidates.add(key)
+    candidates.append(
+        {
+            "url": normalized,
+            "discovery_method": discovery_method,
+            "confidence_score": confidence_score,
+            "depth": depth,
+            "attempt_type": attempt_type,
+        }
+    )
+    return True
+
+
+def score_fallback_link(text: str, url: str, base_host: str) -> int:
+    if not is_http_url(url):
+        return 0
+    if is_linkedin_url(url) or host_matches(url, UNSUPPORTED_CAREER_HOST_HINTS):
+        return 0
+    if BAD_JOB_URL_RE.search(url):
+        return 0
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return 0
+
+    host = parsed.netloc.lower()
+    text_l = clean_text(text).lower()
+    url_l = url.lower()
+    score = 0
+
+    for term in FALLBACK_LINK_TERMS:
+        compact = term.replace(" ", "")
+        dashed = term.replace(" ", "-")
+        if term in text_l:
+            score += 14
+        if dashed in url_l or compact in url_l:
+            score += 10
+
+    if is_ats_url(url):
+        score += 45
+    elif score and host == base_host:
+        score += 5
+    elif score:
+        score -= 5
+
+    if any(signal in parsed.path.lower() for signal in ("/job", "/career", "/opening", "/position")):
+        score += 8
+
+    return max(score, 0)
+
+
+def add_candidates_from_html(
+    html: str,
+    base_url: str,
+    row: Dict[str, str],
+    candidates: List[Dict[str, Any]],
+    seen_candidates: set,
+    discovered_rows: List[Dict[str, str]],
+    discovered_seen: set,
+    log_rows: List[Dict[str, str]],
+    depth: int,
+    limit: int = 12,
+) -> None:
+    soup = BeautifulSoup(html or "", "html.parser")
+    try:
+        base_host = urlparse(base_url).netloc.lower()
+    except ValueError:
+        base_host = ""
+
+    scored: Dict[str, Tuple[int, str, str]] = {}
+    for anchor in soup.find_all("a", href=True):
+        href = clean_text(anchor.get("href", ""))
+        if href.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+
+        url = normalize_url(urljoin(base_url, href))
+        text = clean_text(anchor.get_text(" ", strip=True))
+        score = score_fallback_link(text, url, base_host)
+        if score <= 0:
+            continue
+
+        existing = scored.get(url)
+        if not existing or score > existing[0]:
+            scored[url] = (score, url, text)
+
+    for score, url, _ in sorted(scored.values(), key=lambda item: item[0], reverse=True)[:limit]:
+        discovery_method = "ats_detected" if is_ats_url(url) else "linked_page"
+        if add_candidate(
+            candidates,
+            seen_candidates,
+            url,
+            discovery_method,
+            score,
+            depth=depth,
+            attempt_type=discovery_method,
+        ):
+            record_discovered_page(
+                row,
+                discovered_rows,
+                discovered_seen,
+                url,
+                discovery_method,
+                score,
+            )
+            log_rows.append(
+                make_log_row(
+                    row,
+                    url,
+                    "ats_detected" if discovery_method == "ats_detected" else "fallback_url_found",
+                    "",
+                    0,
+                    "",
+                    attempt_type="discovery",
+                )
+            )
+
+
+def add_common_path_candidates(
+    row: Dict[str, str],
+    candidates: List[Dict[str, Any]],
+    seen_candidates: set,
+) -> None:
+    website = pick_company_website(row)
+    root = get_site_root(website)
+    if not root:
+        return
+
+    for path in FALLBACK_CAREER_PATHS:
+        add_candidate(
+            candidates,
+            seen_candidates,
+            urljoin(root, path.lstrip("/")),
+            "common_path",
+            55,
+            depth=0,
+            attempt_type="common_path",
+        )
+
+
+def fetch_with_logged_retries(
+    row: Dict[str, str],
+    candidate: Dict[str, Any],
+    timeout: int,
+    session: Any,
+    retries: int,
+    backoff: float,
+    sleep_seconds: float,
+    log_rows: List[Dict[str, str]],
+) -> Optional[Any]:
+    attempts = max(0, retries) + 1
+    last_fetch = None
+    last_status = ""
+    last_error_message = ""
+
+    for attempt in range(1, attempts + 1):
+        fetch = fetch_url(
+            candidate["url"],
+            timeout=timeout,
+            session=session,
+            retries=0,
+            backoff=backoff,
+        )
+        last_fetch = fetch
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+
+        page_url = normalize_url(fetch.final_url or candidate["url"])
+        status, error_message = fetch_status(fetch.error, fetch.html)
+        if fetch.redirected:
+            log_rows.append(
+                make_log_row(
+                    row,
+                    candidate["url"],
+                    "redirect_detected",
+                    fetch.status_code,
+                    0,
+                    f"redirected_to={page_url}",
+                    attempt_type=candidate.get("attempt_type", "crawl"),
+                )
+            )
+
+        if not status:
+            return fetch
+
+        last_status = status
+        last_error_message = error_message
+        attempt_message = error_message
+        if attempts > 1:
+            attempt_message = clean_text(f"{attempt_message} attempt={attempt}/{attempts}")
+        log_rows.append(
+            make_log_row(
+                row,
+                candidate["url"],
+                status,
+                fetch.status_code,
+                0,
+                attempt_message,
+                attempt_type=candidate.get("attempt_type", "crawl"),
+            )
+        )
+
+        if attempt < attempts and should_retry_fetch(fetch.error):
+            time.sleep(backoff * (2 ** (attempt - 1)))
+            continue
+        break
+
+    if last_fetch is not None:
+        log_rows.append(
+            make_log_row(
+                row,
+                candidate["url"],
+                final_failure_status(candidate.get("discovery_method", "")),
+                last_fetch.status_code,
+                0,
+                last_error_message or last_status,
+                attempt_type=candidate.get("attempt_type", "crawl"),
+            )
+        )
+    return None
+
+
+def seed_fallback_candidates(
+    row: Dict[str, str],
+    candidates: List[Dict[str, Any]],
+    seen_candidates: set,
+    discovered_rows: List[Dict[str, str]],
+    discovered_seen: set,
+    log_rows: List[Dict[str, str]],
+    timeout: int,
+    session: Any,
+    retries: int,
+    backoff: float,
+    sleep_seconds: float,
+) -> None:
+    website = pick_company_website(row)
+    if not website:
+        log_rows.append(
+            make_log_row(
+                row,
+                "",
+                "invalid_url",
+                "",
+                0,
+                "missing_company_website",
+                attempt_type="fallback_discovery",
+            )
+        )
+        return
+
+    add_common_path_candidates(row, candidates, seen_candidates)
+
+    homepage_candidate = {
+        "url": website,
+        "discovery_method": "homepage_scan",
+        "confidence_score": 40,
+        "depth": 0,
+        "attempt_type": "homepage_scan",
+    }
+    homepage_fetch = fetch_with_logged_retries(
+        row,
+        homepage_candidate,
+        timeout=timeout,
+        session=session,
+        retries=retries,
+        backoff=backoff,
+        sleep_seconds=sleep_seconds,
+        log_rows=log_rows,
+    )
+    if not homepage_fetch:
+        candidates.sort(key=lambda item: int(item.get("confidence_score", 0)), reverse=True)
+        return
+
+    page_url = normalize_url(homepage_fetch.final_url or website)
+    log_rows.append(
+        make_log_row(
+            row,
+            page_url,
+            "fallback_url_found",
+            homepage_fetch.status_code,
+            0,
+            "homepage_scanned",
+            attempt_type="homepage_scan",
+        )
+    )
+    add_candidates_from_html(
+        homepage_fetch.html,
+        page_url,
+        row,
+        candidates,
+        seen_candidates,
+        discovered_rows,
+        discovered_seen,
+        log_rows,
+        depth=1,
+    )
+    candidates.sort(key=lambda item: int(item.get("confidence_score", 0)), reverse=True)
 
 
 def crawl_company(
@@ -1055,110 +1488,131 @@ def crawl_company(
     session: Optional[Any] = None,
     retries: int = 2,
     backoff: float = 0.5,
-) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    company_name = pick_company_name(row)
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
     website = pick_company_website(row)
     known_urls = pick_existing_careers_urls(row)
-    known_url = known_urls[0] if known_urls else ""
     log_rows: List[Dict[str, str]] = []
+    discovered_rows: List[Dict[str, str]] = []
+    discovered_seen: set = set()
+    candidates: List[Dict[str, Any]] = []
+    seen_candidates: set = set()
+    attempted_urls: List[str] = []
+    active_session = session or create_session()
 
     unsupported_known_urls = [
         url for url in known_urls if is_linkedin_url(url) or host_matches(url, UNSUPPORTED_CAREER_HOST_HINTS)
     ]
     known_urls = [url for url in known_urls if url not in unsupported_known_urls]
 
-    if unsupported_known_urls and not known_urls:
-        careers_url_display = "; ".join(unsupported_known_urls)
+    for unsupported_url in unsupported_known_urls:
         log_rows.append(
             make_log_row(
                 row,
-                careers_url_display,
+                unsupported_url,
                 "js_rendered_or_unsupported",
                 "",
                 0,
                 "unsupported_external_profile",
+                attempt_type="known_careers_url",
             )
         )
-        return [
-            make_status_row(
-                row,
-                careers_url_display,
-                careers_url_display,
-                "js_rendered_or_unsupported",
-            )
-        ], log_rows
 
-    if known_urls:
-        careers_urls = known_urls
-        discovery_source = "; ".join(known_urls)
-    else:
-        discovery = discover_careers_page(
-            company_name=company_name,
-            company_website=website,
-            known_url=known_url,
-            timeout=timeout,
-            sleep_seconds=sleep_seconds,
-            session=session,
-            retries=retries,
-            backoff=backoff,
+    for known_url in known_urls:
+        add_candidate(
+            candidates,
+            seen_candidates,
+            known_url,
+            "known_careers_url",
+            100,
+            depth=0,
+            attempt_type="known_careers_url",
         )
-        careers_urls = [discovery.careers_url] if discovery.careers_url else []
-        discovery_source = discovery.source_url or website
 
-        if not careers_urls:
-            status = discovery.status or "careers_page_not_found"
-            log_rows.append(
-                make_log_row(
-                    row,
-                    discovery.source_url or known_url or website,
-                    status,
-                    discovery.http_status,
-                    0,
-                    discovery.error,
-                )
-            )
-            return [make_status_row(row, "", discovery.source_url or website, status)], log_rows
-
-    careers_url_display = "; ".join(careers_urls)
-    urls_to_check = list(careers_urls)
     checked_urls = set()
     found_jobs: List[Dict[str, str]] = []
+    fallback_seeded = not bool(candidates)
+    if fallback_seeded:
+        seed_fallback_candidates(
+            row,
+            candidates,
+            seen_candidates,
+            discovered_rows,
+            discovered_seen,
+            log_rows,
+            timeout=timeout,
+            session=active_session,
+            retries=retries,
+            backoff=backoff,
+            sleep_seconds=sleep_seconds,
+        )
 
-    while urls_to_check and len(checked_urls) < max_pages:
-        url = urls_to_check.pop(0)
+    while len(checked_urls) < max(1, max_pages):
+        if not candidates:
+            if not fallback_seeded:
+                fallback_seeded = True
+                seed_fallback_candidates(
+                    row,
+                    candidates,
+                    seen_candidates,
+                    discovered_rows,
+                    discovered_seen,
+                    log_rows,
+                    timeout=timeout,
+                    session=active_session,
+                    retries=retries,
+                    backoff=backoff,
+                    sleep_seconds=sleep_seconds,
+                )
+            if not candidates:
+                break
+
+        candidate = candidates.pop(0)
+        url = candidate["url"]
         canonical = canonicalize_url(url)
         if canonical in checked_urls:
             continue
         checked_urls.add(canonical)
+        attempted_urls.append(url)
 
-        fetch = fetch_url(url, timeout=timeout, session=session, retries=retries, backoff=backoff)
-        page_url = normalize_url(fetch.final_url or url)
-        checked_urls.add(canonicalize_url(page_url))
-        if sleep_seconds:
-            time.sleep(sleep_seconds)
-
-        status, error_message = fetch_status(fetch.error, fetch.html)
-        if status:
-            log_rows.append(
-                make_log_row(row, url, status, fetch.status_code, 0, error_message)
-            )
+        fetch = fetch_with_logged_retries(
+            row,
+            candidate,
+            timeout=timeout,
+            session=active_session,
+            retries=retries,
+            backoff=backoff,
+            sleep_seconds=sleep_seconds,
+            log_rows=log_rows,
+        )
+        if not fetch:
             continue
 
-        if fetch.redirected:
-            log_rows.append(
-                make_log_row(
-                    row,
-                    url,
-                    "redirect_detected",
-                    fetch.status_code,
-                    0,
-                    f"redirected_to={page_url}",
-                )
+        page_url = normalize_url(fetch.final_url or url)
+        checked_urls.add(canonicalize_url(page_url))
+        discovery_method = candidate.get("discovery_method", "")
+        confidence_score = int(candidate.get("confidence_score", 0))
+
+        if discovery_method != "known_careers_url":
+            record_discovered_page(
+                row,
+                discovered_rows,
+                discovered_seen,
+                page_url,
+                discovery_method,
+                confidence_score,
             )
 
         if looks_blocked_page(fetch.html):
             log_rows.append(
-                make_log_row(row, page_url, "blocked", fetch.status_code, 0, "blocked_page")
+                make_log_row(
+                    row,
+                    page_url,
+                    "blocked",
+                    fetch.status_code,
+                    0,
+                    "blocked_page",
+                    attempt_type=candidate.get("attempt_type", "crawl"),
+                )
             )
             continue
 
@@ -1166,43 +1620,91 @@ def crawl_company(
             jobs = extract_jobs_from_html(fetch.html, page_url)
         except Exception as exc:
             log_rows.append(
-                make_log_row(row, page_url, "parse_error", fetch.status_code, 0, str(exc))
+                make_log_row(
+                    row,
+                    page_url,
+                    "parse_error",
+                    fetch.status_code,
+                    0,
+                    str(exc),
+                    attempt_type=candidate.get("attempt_type", "crawl"),
+                )
             )
             continue
 
-        found_jobs.extend(jobs)
         if jobs:
-            page_status = "success"
+            page_status = "success" if discovery_method == "known_careers_url" else "success_after_fallback"
+            for job in jobs:
+                enriched = dict(job)
+                enriched["careers_url"] = page_url
+                enriched["discovery_method"] = discovery_method
+                found_jobs.append(enriched)
         elif is_likely_js_rendered(fetch.html, page_url):
             page_status = "js_rendered_or_unsupported"
         elif looks_unsupported_structure(fetch.html):
             page_status = "unsupported_structure"
         else:
             page_status = "no_jobs_found"
-        log_rows.append(make_log_row(row, page_url, page_status, fetch.status_code, len(jobs), ""))
+        log_rows.append(
+            make_log_row(
+                row,
+                page_url,
+                page_status,
+                fetch.status_code,
+                len(jobs),
+                "",
+                attempt_type=candidate.get("attempt_type", "crawl"),
+            )
+        )
 
-        if len(checked_urls) < max_pages:
+        if len(checked_urls) < max(1, max_pages) and int(candidate.get("depth", 0)) < 2:
             current_page_urls = {
                 normalize_url(url).rstrip("/"),
                 normalize_url(page_url).rstrip("/"),
             }
-            for _, next_url, _ in find_careers_links(fetch.html, page_url, limit=max_pages):
-                if normalize_url(next_url).rstrip("/") in current_page_urls:
-                    continue
-                next_canonical = canonicalize_url(next_url)
-                if next_canonical not in checked_urls and next_url not in urls_to_check:
-                    urls_to_check.append(next_url)
+            before_count = len(candidates)
+            add_candidates_from_html(
+                fetch.html,
+                page_url,
+                row,
+                candidates,
+                seen_candidates,
+                discovered_rows,
+                discovered_seen,
+                log_rows,
+                depth=int(candidate.get("depth", 0)) + 1,
+                limit=max_pages,
+            )
+            candidates[:] = [
+                item
+                for item in candidates
+                if normalize_url(item["url"]).rstrip("/") not in current_page_urls
+            ]
+            if len(candidates) != before_count:
+                candidates.sort(key=lambda item: int(item.get("confidence_score", 0)), reverse=True)
 
     found_jobs = dedupe_jobs(found_jobs)
     if not found_jobs:
         status = status_from_logs(log_rows)
-        return [make_status_row(row, careers_url_display, discovery_source, status)], log_rows
+        careers_url_display = "; ".join(attempted_urls or unsupported_known_urls)
+        source_url = attempted_urls[-1] if attempted_urls else website
+        return [
+            make_status_row(
+                row,
+                careers_url_display,
+                source_url,
+                status,
+                "fallback_discovery" if fallback_seeded else "known_careers_url",
+            )
+        ], log_rows, discovered_rows
 
     output_rows: List[Dict[str, str]] = []
     for job in found_jobs:
-        base = company_output_base(row, careers_url_display)
+        careers_url = job.get("careers_url", "")
+        base = company_output_base(row, careers_url)
         location_fields = parse_location_fields(job.get("location", ""), row)
         remote = job.get("remote", "") or infer_remote_status(location_fields["location"])
+        discovery_method = job.get("discovery_method", "")
         base.update(
             {
                 "job_title": job.get("job_title", ""),
@@ -1217,13 +1719,14 @@ def crawl_company(
                 "department": job.get("department", ""),
                 "date_found": today_utc(),
                 "last_seen_at": today_utc(),
-                "source_url": job.get("source_url", careers_url_display),
-                "status": "success",
+                "source_url": job.get("source_url", careers_url),
+                "discovery_method": discovery_method,
+                "status": "success" if discovery_method == "known_careers_url" else "success_after_fallback",
             }
         )
         output_rows.append(base)
 
-    return output_rows, log_rows
+    return output_rows, log_rows, discovered_rows
 
 
 def dedupe_output_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -1233,6 +1736,13 @@ def dedupe_output_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
         job_url = canonicalize_url(row.get("job_url", ""))
         if job_url:
             key = ("job", job_url)
+        elif clean_text(row.get("job_title", "")):
+            key = (
+                "job_fallback",
+                clean_text(row.get("company_name", "")).lower(),
+                clean_text(row.get("job_title", "")).lower(),
+                clean_text(row.get("location", "")).lower(),
+            )
         else:
             key = (
                 "status",
@@ -1256,27 +1766,35 @@ def summarize_discovered_pages(output_rows: List[Dict[str, str]]) -> List[Dict[s
     rows: List[Dict[str, str]] = []
     for row in output_rows:
         for careers_url in split_careers_url_display(row.get("careers_url", "")):
-            key = (row.get("company_id", ""), careers_url)
+            key = (row.get("company_id", ""), canonicalize_url(careers_url))
             if key in seen:
                 continue
             seen.add(key)
-            status = row.get("status", "")
-            discovered_status = (
-                "js_rendered_or_unsupported"
-                if status == "js_rendered_or_unsupported"
-                else "careers_page_found"
-            )
             rows.append(
                 make_discovered_page_row(
                     row,
                     careers_url,
-                    row.get("source_url", ""),
-                    discovered_status,
-                    "",
-                    f"crawl_status={status}",
+                    row.get("discovery_method", "") or "known_careers_url",
+                    100 if row.get("status") == "success" else 50,
                 )
             )
     return rows
+
+
+def dedupe_discovered_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for row in rows:
+        key = (
+            clean_text(row.get("company_name", "")).lower(),
+            canonicalize_url(row.get("discovered_url", "")),
+            row.get("discovery_method", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
 
 
 def summarize_failed_companies(output_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -1311,13 +1829,14 @@ def run_crawl(args: argparse.Namespace) -> None:
     company_rows, duplicate_rows = read_company_rows_with_duplicates(input_path, limit=args.limit)
     output_rows: List[Dict[str, str]] = []
     log_rows: List[Dict[str, str]] = []
+    discovered_rows: List[Dict[str, str]] = []
     session = create_session()
 
     for index, row in enumerate(company_rows, start=1):
         company_name = pick_company_name(row) or f"company_{index}"
         print(f"[{index}/{len(company_rows)}] {company_name}")
         try:
-            jobs, logs = crawl_company(
+            jobs, logs, discovered = crawl_company(
                 row=row,
                 timeout=args.timeout,
                 sleep_seconds=args.sleep,
@@ -1336,10 +1855,13 @@ def run_crawl(args: argparse.Namespace) -> None:
                     "",
                     0,
                     str(exc),
+                    attempt_type="company_crawl",
                 )
             ]
+            discovered = []
         output_rows.extend(jobs)
         log_rows.extend(logs)
+        discovered_rows.extend(discovered)
 
     for duplicate in duplicate_rows:
         log_rows.append(
@@ -1350,11 +1872,12 @@ def run_crawl(args: argparse.Namespace) -> None:
                 "",
                 0,
                 "duplicate_company",
+                attempt_type="input_dedupe",
             )
         )
 
     output_rows = dedupe_output_rows(output_rows)
-    discovered_rows = summarize_discovered_pages(output_rows)
+    discovered_rows = dedupe_discovered_rows(discovered_rows or summarize_discovered_pages(output_rows))
     failed_rows = summarize_failed_companies(output_rows)
 
     write_csv(output_path, output_rows, OUTPUT_FIELDS)
@@ -1362,7 +1885,9 @@ def run_crawl(args: argparse.Namespace) -> None:
     write_csv(discovered_path, discovered_rows, DISCOVERED_FIELDS)
     write_csv(failed_path, failed_rows, FAILED_FIELDS)
 
-    found_count = sum(1 for row in output_rows if row.get("status") == "success")
+    found_count = sum(
+        1 for row in output_rows if row.get("status") in {"success", "success_after_fallback"}
+    )
     print(f"Wrote {len(output_rows)} rows to {output_path}")
     print(f"Wrote {len(log_rows)} crawl log rows to {log_path}")
     print(f"Wrote {len(discovered_rows)} discovered page rows to {discovered_path}")
@@ -1392,7 +1917,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-pages-per-company",
         type=int,
-        default=3,
+        default=12,
         help="Career/listing pages to fetch per company.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit companies for testing.")

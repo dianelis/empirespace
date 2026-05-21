@@ -12,4 +12,4 @@ client/dist/
 client/*.tsbuildinfo
 client/vite.config.js
 client/vite.config.d.ts
-!client/src/data/jobs_out.csv
+!client/public/data/jobs_out.csv

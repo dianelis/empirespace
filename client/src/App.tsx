@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Orbit } from "lucide-react";
 import { Filters } from "./components/Filters";
 import { JobTable } from "./components/JobTable";
 import { StatsCards } from "./components/StatsCards";
 import { ALL_FILTER } from "./constants";
-import { jobs } from "./data/jobs";
+import { loadJobs } from "./data/jobs";
 import type { FilterOptions, FiltersState, Job } from "./types";
 
 const initialFilters: FiltersState = {
@@ -42,7 +42,36 @@ function filterJobs(allJobs: Job[], filters: FiltersState) {
 }
 
 function App() {
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [filters, setFilters] = useState<FiltersState>(initialFilters);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    loadJobs()
+      .then((loadedJobs) => {
+        if (isMounted) {
+          setJobs(loadedJobs);
+          setLoadError("");
+        }
+      })
+      .catch((error: Error) => {
+        if (isMounted) {
+          setLoadError(error.message);
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const options = useMemo<FilterOptions>(
     () => ({
@@ -52,10 +81,10 @@ function App() {
       countries: unique(jobs.map((job) => job.country)),
       remoteStatuses: unique(jobs.map((job) => job.remote)),
     }),
-    [],
+    [jobs],
   );
 
-  const filteredJobs = useMemo(() => filterJobs(jobs, filters), [filters]);
+  const filteredJobs = useMemo(() => filterJobs(jobs, filters), [filters, jobs]);
 
   return (
     <main className="relative min-h-screen overflow-hidden">
@@ -82,6 +111,16 @@ function App() {
 
         <StatsCards jobs={jobs} />
         <Filters filters={filters} options={options} onChange={setFilters} />
+        {isLoading && (
+          <div className="rounded-lg border border-border bg-card/80 px-5 py-4 text-sm text-muted-foreground">
+            Loading jobs data...
+          </div>
+        )}
+        {loadError && (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
+            {loadError}
+          </div>
+        )}
         <JobTable jobs={filteredJobs} />
       </div>
     </main>

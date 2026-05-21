@@ -1,5 +1,4 @@
 import Papa from "papaparse";
-import jobsCsv from "./jobs_out.csv?raw";
 import type { Job } from "../types";
 
 type RawRow = Record<string, string | undefined>;
@@ -88,9 +87,22 @@ const normalizeRow = (row: RawRow, index: number): Job | null => {
   };
 };
 
-export const jobs: Job[] = Papa.parse<RawRow>(jobsCsv, {
-  header: true,
-  skipEmptyLines: true,
-})
-  .data.map(normalizeRow)
-  .filter((job): job is Job => Boolean(job));
+export const parseJobsCsv = (csv: string): Job[] =>
+  Papa.parse<RawRow>(csv, {
+    header: true,
+    skipEmptyLines: true,
+  })
+    .data.map(normalizeRow)
+    .filter((job): job is Job => Boolean(job));
+
+export const loadJobs = async (): Promise<Job[]> => {
+  const response = await fetch(`${import.meta.env.BASE_URL}data/jobs_out.csv`, {
+    cache: "no-cache",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to load jobs CSV (${response.status})`);
+  }
+
+  return parseJobsCsv(await response.text());
+};

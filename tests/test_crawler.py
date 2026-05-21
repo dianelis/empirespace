@@ -30,11 +30,20 @@ def test_make_log_row_contains_expected_fields():
         "company_name": "Example Space",
         "company_website": "https://example.com",
     }
-    log = make_log_row(row, "https://example.com/careers", "success", "200", 2, "")
+    log = make_log_row(
+        row,
+        "https://example.com/careers",
+        "success",
+        "200",
+        2,
+        "",
+        attempt_type="known_careers_url",
+    )
     assert set(log) == set(LOG_FIELDS)
     assert log["company_name"] == "Example Space"
-    assert log["status"] == "success"
-    assert log["jobs_found"] == "2"
+    assert log["scraper_status"] == "success"
+    assert log["attempt_type"] == "known_careers_url"
+    assert log["status_code"] == "200"
 
 
 def test_crawl_company_no_jobs_found(monkeypatch):
@@ -49,14 +58,15 @@ def test_crawl_company_no_jobs_found(monkeypatch):
 
     monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
 
-    rows, logs = crawl_company(
+    rows, logs, _ = crawl_company(
         {"company_name": "Example", "company_website": "https://example.com", "careers_url": "https://example.com/careers"},
         timeout=1,
         sleep_seconds=0,
         max_pages=1,
+        retries=0,
     )
     assert rows[0]["status"] == "no_jobs_found"
-    assert logs[0]["status"] == "no_jobs_found"
+    assert logs[0]["scraper_status"] == "no_jobs_found"
 
 
 def test_empty_html_maps_to_parse_error(monkeypatch):
@@ -71,14 +81,15 @@ def test_empty_html_maps_to_parse_error(monkeypatch):
 
     monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
 
-    rows, logs = crawl_company(
+    rows, logs, _ = crawl_company(
         {"company_name": "Example", "company_website": "https://example.com", "careers_url": "https://example.com/careers"},
         timeout=1,
         sleep_seconds=0,
         max_pages=1,
+        retries=0,
     )
     assert rows[0]["status"] == "parse_error"
-    assert logs[0]["status"] == "parse_error"
+    assert logs[0]["scraper_status"] == "parse_error"
     assert logs[0]["error_message"] == "empty_html"
 
 
@@ -164,14 +175,94 @@ def test_crawl_company_js_heavy_status(monkeypatch):
         )
 
     monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
-    rows, logs = crawl_company(
+    rows, logs, _ = crawl_company(
         {"company_name": "Example", "company_website": "https://example.com", "careers_url": "https://jobs.workdayjobs.com/example"},
         timeout=1,
         sleep_seconds=0,
         max_pages=1,
+        retries=0,
     )
     assert rows[0]["status"] == "js_rendered_or_unsupported"
-    assert logs[0]["status"] == "js_rendered_or_unsupported"
+    assert logs[0]["scraper_status"] == "js_rendered_or_unsupported"
+
+
+def test_known_careers_url_falls_back_to_common_path(monkeypatch):
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
+        if url.endswith("/bad-careers"):
+            return discover_jobs_pages.FetchResult(
+                url=url,
+                final_url=url,
+                status_code="404",
+                content_type="text/html",
+                html="<html>missing</html>",
+                error="http_404",
+            )
+        if url.rstrip("/").endswith("/careers"):
+            return discover_jobs_pages.FetchResult(
+                url=url,
+                final_url=url,
+                status_code="200",
+                content_type="text/html",
+                html='<a href="/jobs/test-engineer">Test Engineer</a><span>Location: Remote</span>',
+            )
+        return discover_jobs_pages.FetchResult(
+            url=url,
+            final_url=url,
+            status_code="200",
+            content_type="text/html",
+            html='<a href="/careers">Careers</a>',
+        )
+
+    monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
+    rows, logs, discovered = crawl_company(
+        {
+            "company_name": "Example",
+            "company_website": "https://example.com",
+            "careers_url": "https://example.com/bad-careers",
+        },
+        timeout=1,
+        sleep_seconds=0,
+        max_pages=4,
+        retries=0,
+    )
+
+    assert rows[0]["status"] == "success_after_fallback"
+    assert rows[0]["discovery_method"] == "common_path"
+    assert any(log["scraper_status"] == "careers_url_failed" for log in logs)
+    assert any(row["discovered_url"] == "https://example.com/careers" for row in discovered)
+
+
+def test_homepage_scan_detects_external_ats(monkeypatch):
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
+        if "greenhouse.io" in url:
+            return discover_jobs_pages.FetchResult(
+                url=url,
+                final_url=url,
+                status_code="200",
+                content_type="text/html",
+                html='<a href="https://boards.greenhouse.io/example/jobs/123">Flight Software Engineer</a>',
+            )
+        return discover_jobs_pages.FetchResult(
+            url=url,
+            final_url=url,
+            status_code="200",
+            content_type="text/html",
+            html='<a href="https://boards.greenhouse.io/example">Open positions</a>',
+        )
+
+    monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
+    rows, logs, discovered = crawl_company(
+        {"company_name": "Example", "company_website": "https://example.com"},
+        timeout=1,
+        sleep_seconds=0,
+        max_pages=2,
+        retries=0,
+    )
+
+    assert rows[0]["status"] == "success_after_fallback"
+    assert rows[0]["discovery_method"] == "ats_detected"
+    assert any(log["scraper_status"] == "ats_detected" for log in logs)
+    assert any(row["discovery_method"] == "ats_detected" for row in discovered)
 
 
 def test_run_crawl_creates_all_csv_outputs(tmp_path, monkeypatch):

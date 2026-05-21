@@ -42,9 +42,16 @@ def test_deduplication_removes_duplicate_urls_and_titles():
         {"job_title": "Software Engineer", "job_url": "https://example.com/jobs/1?utm_source=x", "location": "NY"},
         {"job_title": "Software Engineer", "job_url": "https://example.com/jobs/2", "location": "NY"},
         {"job_title": "Test Engineer", "job_url": "https://example.com/jobs/3", "location": "Remote"},
+        {"job_title": "Test Engineer", "job_url": "", "location": "Remote"},
+        {"job_title": "Test Engineer", "job_url": "", "location": "Remote"},
     ]
     deduped = dedupe_jobs(rows)
-    assert [row["job_title"] for row in deduped] == ["Software Engineer", "Test Engineer"]
+    assert [row["job_url"] for row in deduped] == [
+        "https://example.com/jobs/1",
+        "https://example.com/jobs/2",
+        "https://example.com/jobs/3",
+        "",
+    ]
 
 
 def test_empty_html_returns_no_jobs():
