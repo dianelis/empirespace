@@ -5,3 +5,5 @@ __pycache__/
 venv/
 output/*
 !output/.gitkeep
+jobs_out.csv
+crawl_log.csv

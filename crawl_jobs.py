@@ -25,6 +25,7 @@ from discover_jobs_pages import (
     pick_company_name,
     pick_company_website,
     pick_existing_careers_url,
+    pick_existing_careers_urls,
 )
 
 
@@ -283,6 +284,7 @@ def extract_jsonld_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
 def clean_job_title(title: str) -> str:
     title = clean_text(title)
     title = re.sub(r"^(apply for|apply to|view|read more about)\s+", "", title, flags=re.I)
+    title = re.split(r"\b(?:location|department|team|category|function)\s*[:\-]", title, maxsplit=1, flags=re.I)[0]
     title = re.sub(r"\s+\|\s+.*$", "", title)
     title = re.sub(r"\s+-\s+careers?$", "", title, flags=re.I)
     title = title.strip(" -|:")
@@ -435,21 +437,27 @@ def extract_jobs_from_html(html: str, page_url: str) -> List[Dict[str, str]]:
 
 
 def dedupe_jobs(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    seen = set()
+    seen_urls = set()
+    seen_titles = set()
     out: List[Dict[str, str]] = []
     for row in rows:
         key = canonicalize_url(row.get("job_url", ""))
-        if not key:
-            key = "|".join(
-                [
-                    clean_text(row.get("job_title", "")).lower(),
-                    clean_text(row.get("location", "")).lower(),
-                    clean_text(row.get("source_url", "")).lower(),
-                ]
-            )
-        if key in seen:
+        title_key = "|".join(
+            [
+                clean_text(row.get("job_title", "")).lower(),
+                clean_text(row.get("location", "")).lower(),
+            ]
+        )
+
+        if key and key in seen_urls:
             continue
-        seen.add(key)
+        if title_key.strip("|") and title_key in seen_titles:
+            continue
+
+        if key:
+            seen_urls.add(key)
+        if title_key.strip("|"):
+            seen_titles.add(title_key)
         out.append(row)
     return out
 
@@ -512,6 +520,39 @@ def make_log_row(
     }
 
 
+def fetch_status(fetch_error: str, html: str = "") -> Tuple[str, str]:
+    if fetch_error == "invalid_url":
+        return "invalid_url", "invalid_url"
+    if fetch_error == "timeout":
+        return "timeout", "timeout"
+    if fetch_error == "non_html_response":
+        return "non_html_response", "non_html_response"
+    if fetch_error.startswith("http_"):
+        return "request_failed", fetch_error
+    if fetch_error:
+        return "request_failed", fetch_error
+    if not (html or "").strip():
+        return "parse_error", "empty_html"
+    return "", ""
+
+
+def status_from_logs(log_rows: List[Dict[str, str]]) -> str:
+    if not log_rows:
+        return "no_jobs_found"
+
+    statuses = [row.get("status", "") for row in log_rows]
+    failure_statuses = {
+        "invalid_url",
+        "request_failed",
+        "timeout",
+        "non_html_response",
+        "parse_error",
+    }
+    if statuses and all(status in failure_statuses for status in statuses):
+        return statuses[0] or "request_failed"
+    return "no_jobs_found"
+
+
 def crawl_company(
     row: Dict[str, str],
     timeout: int,
@@ -520,33 +561,40 @@ def crawl_company(
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     company_name = pick_company_name(row)
     website = pick_company_website(row)
-    known_url = pick_existing_careers_url(row)
+    known_urls = pick_existing_careers_urls(row)
+    known_url = known_urls[0] if known_urls else ""
     log_rows: List[Dict[str, str]] = []
 
-    discovery = discover_careers_page(
-        company_name=company_name,
-        company_website=website,
-        known_url=known_url,
-        timeout=timeout,
-        sleep_seconds=sleep_seconds,
-    )
-    careers_url = discovery.careers_url
-
-    if not careers_url:
-        status = discovery.status if discovery.status != "not_found" else "no_careers_page_found"
-        log_rows.append(
-            make_log_row(
-                row,
-                discovery.source_url or known_url or website,
-                status,
-                discovery.http_status,
-                0,
-                discovery.error,
-            )
+    if known_urls:
+        careers_urls = known_urls
+        discovery_source = "; ".join(known_urls)
+    else:
+        discovery = discover_careers_page(
+            company_name=company_name,
+            company_website=website,
+            known_url=known_url,
+            timeout=timeout,
+            sleep_seconds=sleep_seconds,
         )
-        return [make_status_row(row, "", discovery.source_url or website, status)], log_rows
+        careers_urls = [discovery.careers_url] if discovery.careers_url else []
+        discovery_source = discovery.source_url or website
 
-    urls_to_check = [careers_url]
+        if not careers_urls:
+            status = discovery.status if discovery.status != "not_found" else "no_careers_page_found"
+            log_rows.append(
+                make_log_row(
+                    row,
+                    discovery.source_url or known_url or website,
+                    status,
+                    discovery.http_status,
+                    0,
+                    discovery.error,
+                )
+            )
+            return [make_status_row(row, "", discovery.source_url or website, status)], log_rows
+
+    careers_url_display = "; ".join(careers_urls)
+    urls_to_check = list(careers_urls)
     checked_urls = set()
     found_jobs: List[Dict[str, str]] = []
 
@@ -563,16 +611,24 @@ def crawl_company(
         if sleep_seconds:
             time.sleep(sleep_seconds)
 
-        if not fetch.html or fetch.error:
-            status = "request_failed" if fetch.error else "empty_response"
+        status, error_message = fetch_status(fetch.error, fetch.html)
+        if status:
             log_rows.append(
-                make_log_row(row, url, status, fetch.status_code, 0, fetch.error)
+                make_log_row(row, url, status, fetch.status_code, 0, error_message)
             )
             continue
 
-        jobs = extract_jobs_from_html(fetch.html, page_url)
+        try:
+            jobs = extract_jobs_from_html(fetch.html, page_url)
+        except Exception as exc:
+            log_rows.append(
+                make_log_row(row, page_url, "parse_error", fetch.status_code, 0, str(exc))
+            )
+            continue
+
         found_jobs.extend(jobs)
-        log_rows.append(make_log_row(row, page_url, "ok", fetch.status_code, len(jobs), ""))
+        page_status = "success" if jobs else "no_jobs_found"
+        log_rows.append(make_log_row(row, page_url, page_status, fetch.status_code, len(jobs), ""))
 
         if len(checked_urls) < max_pages:
             current_page_urls = {
@@ -588,11 +644,12 @@ def crawl_company(
 
     found_jobs = dedupe_jobs(found_jobs)
     if not found_jobs:
-        return [make_status_row(row, careers_url, careers_url, "no_jobs_found")], log_rows
+        status = status_from_logs(log_rows)
+        return [make_status_row(row, careers_url_display, discovery_source, status)], log_rows
 
     output_rows: List[Dict[str, str]] = []
     for job in found_jobs:
-        base = company_output_base(row, careers_url)
+        base = company_output_base(row, careers_url_display)
         base.update(
             {
                 "job_title": job.get("job_title", ""),
@@ -600,8 +657,8 @@ def crawl_company(
                 "location": job.get("location", ""),
                 "department": job.get("department", ""),
                 "date_found": today_utc(),
-                "source_url": job.get("source_url", careers_url),
-                "status": "found",
+                "source_url": job.get("source_url", careers_url_display),
+                "status": "success",
             }
         )
         output_rows.append(base)
@@ -642,12 +699,25 @@ def run_crawl(args: argparse.Namespace) -> None:
     for index, row in enumerate(company_rows, start=1):
         company_name = pick_company_name(row) or f"company_{index}"
         print(f"[{index}/{len(company_rows)}] {company_name}")
-        jobs, logs = crawl_company(
-            row=row,
-            timeout=args.timeout,
-            sleep_seconds=args.sleep,
-            max_pages=args.max_pages_per_company,
-        )
+        try:
+            jobs, logs = crawl_company(
+                row=row,
+                timeout=args.timeout,
+                sleep_seconds=args.sleep,
+                max_pages=args.max_pages_per_company,
+            )
+        except Exception as exc:
+            jobs = [make_status_row(row, "", pick_company_website(row), "request_failed")]
+            logs = [
+                make_log_row(
+                    row,
+                    pick_existing_careers_url(row) or pick_company_website(row),
+                    "request_failed",
+                    "",
+                    0,
+                    str(exc),
+                )
+            ]
         output_rows.extend(jobs)
         log_rows.extend(logs)
 
@@ -655,7 +725,7 @@ def run_crawl(args: argparse.Namespace) -> None:
     write_csv(output_path, output_rows, OUTPUT_FIELDS)
     write_csv(log_path, log_rows, LOG_FIELDS)
 
-    found_count = sum(1 for row in output_rows if row.get("status") == "found")
+    found_count = sum(1 for row in output_rows if row.get("status") == "success")
     print(f"Wrote {len(output_rows)} rows to {output_path}")
     print(f"Wrote {len(log_rows)} crawl log rows to {log_path}")
     print(f"Found {found_count} job rows")
@@ -664,8 +734,8 @@ def run_crawl(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Crawl company career pages into jobs CSV.")
     parser.add_argument("--input", default="data/companies.csv", help="Input company CSV.")
-    parser.add_argument("--output", default="output/jobs.csv", help="Output jobs CSV.")
-    parser.add_argument("--log", default="output/crawl_log.csv", help="Output crawl log CSV.")
+    parser.add_argument("--output", default="jobs_out.csv", help="Output jobs CSV.")
+    parser.add_argument("--log", default="crawl_log.csv", help="Output crawl log CSV.")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--sleep", type=float, default=0.2, help="Seconds between requests.")
     parser.add_argument(

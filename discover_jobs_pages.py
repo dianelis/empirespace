@@ -93,6 +93,7 @@ class FetchResult:
     url: str
     final_url: str = ""
     status_code: str = ""
+    content_type: str = ""
     html: str = ""
     error: str = ""
 
@@ -131,6 +132,8 @@ def normalize_url(url: str) -> str:
     try:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        if any(char.isspace() for char in parsed.netloc):
             return ""
 
         scheme = parsed.scheme.lower()
@@ -176,6 +179,16 @@ def is_linkedin_url(url: str) -> bool:
         return False
 
 
+def is_html_content_type(content_type: str) -> bool:
+    if not content_type:
+        return True
+    content_type = content_type.lower()
+    return any(
+        allowed in content_type
+        for allowed in ("text/html", "application/xhtml+xml", "application/xml", "text/xml")
+    )
+
+
 def fetch_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> FetchResult:
     normalized = normalize_url(url)
     if not normalized:
@@ -188,19 +201,38 @@ def fetch_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> FetchResult:
             timeout=timeout,
             allow_redirects=True,
         )
+        content_type = response.headers.get("Content-Type", "")
+        if not is_html_content_type(content_type):
+            return FetchResult(
+                url=normalized,
+                final_url=response.url,
+                status_code=str(response.status_code),
+                content_type=content_type,
+                html="",
+                error="non_html_response",
+            )
+
         return FetchResult(
             url=normalized,
             final_url=response.url,
             status_code=str(response.status_code),
+            content_type=content_type,
             html=response.text or "",
             error="" if response.status_code < 400 else f"http_{response.status_code}",
         )
+    except requests.Timeout:
+        return FetchResult(url=normalized, error="timeout")
     except requests.RequestException as exc:
-        return FetchResult(url=normalized, error=exc.__class__.__name__)
+        return FetchResult(url=normalized, error=f"request_failed:{exc.__class__.__name__}")
 
 
 def looks_usable_page(fetch: FetchResult) -> bool:
-    return bool(fetch.html) and fetch.status_code.isdigit() and int(fetch.status_code) < 400
+    return (
+        not fetch.error
+        and bool(fetch.html.strip())
+        and fetch.status_code.isdigit()
+        and int(fetch.status_code) < 400
+    )
 
 
 def score_careers_link(text: str, url: str, base_host: str) -> int:
@@ -273,7 +305,20 @@ def find_careers_links(html: str, base_url: str, limit: int = 5) -> List[Tuple[i
     return sorted(candidates.values(), key=lambda item: item[0], reverse=True)[:limit]
 
 
-def pick_existing_careers_url(row: Dict[str, str]) -> str:
+def split_url_values(value: str) -> List[str]:
+    value = clean_text(value)
+    if is_blank(value):
+        return []
+
+    found_urls = re.findall(r"https?://[^\s|;]+", value, flags=re.I)
+    if len(found_urls) > 1:
+        return [url.rstrip(",") for url in found_urls]
+
+    return [item for item in re.split(r"[|;\n]+", value) if clean_text(item)]
+
+
+def pick_existing_careers_urls(row: Dict[str, str]) -> List[str]:
+    urls: List[str] = []
     for column in (
         "careers_url",
         "jobs_page_url",
@@ -281,10 +326,16 @@ def pick_existing_careers_url(row: Dict[str, str]) -> str:
         "job_page_url",
         "careers_page",
     ):
-        value = normalize_url(row.get(column, ""))
-        if value:
-            return value
-    return ""
+        for raw_value in split_url_values(row.get(column, "")):
+            value = normalize_url(raw_value)
+            if value and value not in urls:
+                urls.append(value)
+    return urls
+
+
+def pick_existing_careers_url(row: Dict[str, str]) -> str:
+    urls = pick_existing_careers_urls(row)
+    return urls[0] if urls else ""
 
 
 def pick_company_name(row: Dict[str, str]) -> str:
@@ -347,7 +398,7 @@ def discover_careers_page(
             )
 
     root = get_site_root(fetch.final_url or website)
-    if root:
+    if root and not fetch.error:
         for path in CAREER_PATHS:
             candidate_url = urljoin(root, path.lstrip("/"))
             candidate_fetch = fetch_url(candidate_url, timeout=timeout)
