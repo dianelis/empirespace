@@ -11,6 +11,8 @@ The scraper uses only `requests` and `BeautifulSoup4` for web scraping. It does 
 - `crawl_jobs.py` - main CLI crawler that writes job rows for later MySQL ingestion.
 - `jobs_out.csv` - generated job results.
 - `crawl_log.csv` - generated request/status log.
+- `output/discovered_pages.csv` - generated career page inventory for later manual/API review.
+- `output/failed_companies.csv` - generated non-success company summary.
 - `tests/` - pytest coverage for URL handling, parsing, logging, and request failures.
 - `.github/workflows/tests.yml` - GitHub Actions workflow that runs syntax checks and pytest.
 
@@ -28,6 +30,12 @@ To crawl the included company CSV:
 
 ```bash
 python crawl_jobs.py --input data/companies.csv --output jobs_out.csv --log crawl_log.csv
+```
+
+The crawler uses a shared `requests.Session`, polite headers, configurable timeouts, and retry/backoff settings:
+
+```bash
+python crawl_jobs.py --timeout 15 --retries 2 --backoff 0.5
 ```
 
 For a quick smoke test:
@@ -66,6 +74,10 @@ python -m compileall .
 - `source_url`
 - `status`
 
-If no job listings are found for a company, the crawler writes a row with `status` such as `no_jobs_found`, `no_careers_page_found`, `unsupported_source`, `invalid_url`, `request_failed`, `timeout`, `non_html_response`, or `parse_error`.
+If no job listings are found for a company, the crawler writes a row with `status` such as `no_jobs_found`, `careers_page_not_found`, `js_rendered_or_unsupported`, `invalid_url`, `request_failed`, `timeout`, `non_html_response`, or `parse_error`.
+
+Standard statuses include `success`, `no_jobs_found`, `careers_page_found`, `careers_page_not_found`, `invalid_url`, `timeout`, `request_failed`, `parse_error`, `non_html_response`, `js_rendered_or_unsupported`, `duplicate_skipped`, `redirect_detected`, `blocked`, and `unsupported_structure`.
 
 `crawl_log.csv` includes the company, URL checked, request status, HTTP status, jobs found on that URL, and any error message. One failed request or company is logged and does not stop the full crawl.
+
+JavaScript-heavy pages are not rendered with browser automation. They are marked `js_rendered_or_unsupported` and preserved in the CSV outputs for later manual/API review.

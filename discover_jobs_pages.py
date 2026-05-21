@@ -96,12 +96,13 @@ class FetchResult:
     content_type: str = ""
     html: str = ""
     error: str = ""
+    redirected: bool = False
 
 
 @dataclass
 class DiscoveryResult:
     careers_url: str = ""
-    status: str = "not_found"
+    status: str = "careers_page_not_found"
     source_url: str = ""
     http_status: str = ""
     error: str = ""
@@ -179,51 +180,112 @@ def is_linkedin_url(url: str) -> bool:
         return False
 
 
+def create_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
+
+
 def is_html_content_type(content_type: str) -> bool:
     if not content_type:
         return True
     content_type = content_type.lower()
-    return any(
-        allowed in content_type
-        for allowed in ("text/html", "application/xhtml+xml", "application/xml", "text/xml")
-    )
+    return any(allowed in content_type for allowed in ("text/html", "application/xhtml+xml"))
 
 
-def fetch_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> FetchResult:
+def read_response_text(response: requests.Response) -> str:
+    try:
+        return response.text or ""
+    except UnicodeError:
+        return response.content.decode("utf-8", errors="replace")
+
+
+def fetch_url(
+    url: str,
+    timeout: int = DEFAULT_TIMEOUT,
+    session: Optional[requests.Session] = None,
+    retries: int = 2,
+    backoff: float = 0.5,
+) -> FetchResult:
     normalized = normalize_url(url)
     if not normalized:
         return FetchResult(url=url, error="invalid_url")
 
-    try:
-        response = requests.get(
-            normalized,
-            headers=HEADERS,
-            timeout=timeout,
-            allow_redirects=True,
-        )
-        content_type = response.headers.get("Content-Type", "")
-        if not is_html_content_type(content_type):
-            return FetchResult(
-                url=normalized,
-                final_url=response.url,
-                status_code=str(response.status_code),
-                content_type=content_type,
-                html="",
-                error="non_html_response",
-            )
+    active_session = session or create_session()
+    attempts = max(0, retries) + 1
+    last_result = FetchResult(url=normalized, error="request_failed")
 
-        return FetchResult(
-            url=normalized,
-            final_url=response.url,
-            status_code=str(response.status_code),
-            content_type=content_type,
-            html=response.text or "",
-            error="" if response.status_code < 400 else f"http_{response.status_code}",
-        )
-    except requests.Timeout:
-        return FetchResult(url=normalized, error="timeout")
-    except requests.RequestException as exc:
-        return FetchResult(url=normalized, error=f"request_failed:{exc.__class__.__name__}")
+    for attempt in range(attempts):
+        try:
+            response = active_session.get(
+                normalized,
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            content_type = response.headers.get("Content-Type", "")
+            status_code = str(response.status_code)
+            redirected = bool(response.history) or normalize_url(response.url) != normalized
+
+            if response.status_code in {403, 429}:
+                last_result = FetchResult(
+                    url=normalized,
+                    final_url=response.url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    html=read_response_text(response),
+                    error="blocked",
+                    redirected=redirected,
+                )
+            elif response.status_code >= 400:
+                last_result = FetchResult(
+                    url=normalized,
+                    final_url=response.url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    html=read_response_text(response),
+                    error=f"http_{response.status_code}",
+                    redirected=redirected,
+                )
+            elif not is_html_content_type(content_type):
+                return FetchResult(
+                    url=normalized,
+                    final_url=response.url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    html="",
+                    error="non_html_response",
+                    redirected=redirected,
+                )
+            else:
+                return FetchResult(
+                    url=normalized,
+                    final_url=response.url,
+                    status_code=status_code,
+                    content_type=content_type,
+                    html=read_response_text(response),
+                    error="",
+                    redirected=redirected,
+                )
+
+            if attempt < attempts - 1 and response.status_code in {429, 500, 502, 503, 504}:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return last_result
+        except requests.Timeout:
+            last_result = FetchResult(url=normalized, error="timeout")
+        except requests.TooManyRedirects:
+            last_result = FetchResult(url=normalized, error="redirect_detected")
+        except requests.SSLError:
+            last_result = FetchResult(url=normalized, error="request_failed:ssl_error")
+        except requests.ConnectionError:
+            last_result = FetchResult(url=normalized, error="request_failed:connection_error")
+        except requests.RequestException as exc:
+            last_result = FetchResult(url=normalized, error=f"request_failed:{exc.__class__.__name__}")
+
+        if attempt < attempts - 1:
+            time.sleep(backoff * (2 ** attempt))
+
+    return last_result
 
 
 def looks_usable_page(fetch: FetchResult) -> bool:
@@ -360,29 +422,33 @@ def discover_careers_page(
     known_url: str = "",
     timeout: int = DEFAULT_TIMEOUT,
     sleep_seconds: float = 0.0,
+    session: Optional[requests.Session] = None,
+    retries: int = 2,
+    backoff: float = 0.5,
 ) -> DiscoveryResult:
     known_url = normalize_url(known_url)
     if known_url:
         if is_linkedin_url(known_url):
             return DiscoveryResult(
                 careers_url="",
-                status="unsupported_source",
+                status="js_rendered_or_unsupported",
                 source_url=known_url,
-                error="linkedin_requires_browser_or_auth",
+                error="unsupported_external_profile",
             )
-        return DiscoveryResult(careers_url=known_url, status="known_url", source_url=known_url)
+        return DiscoveryResult(careers_url=known_url, status="careers_page_found", source_url=known_url)
 
     website = normalize_url(company_website)
     if not website:
         return DiscoveryResult(status="invalid_url", error="missing_company_website")
     if is_linkedin_url(website) or host_contains(website, BAD_HOST_HINTS):
         return DiscoveryResult(
-            status="unsupported_source",
+            status="js_rendered_or_unsupported",
             source_url=website,
-            error="social_profile_is_not_company_website",
+            error="unsupported_external_profile",
         )
 
-    fetch = fetch_url(website, timeout=timeout)
+    active_session = session or create_session()
+    fetch = fetch_url(website, timeout=timeout, session=active_session, retries=retries, backoff=backoff)
     if sleep_seconds:
         time.sleep(sleep_seconds)
 
@@ -392,7 +458,7 @@ def discover_careers_page(
             _, url, _ = links[0]
             return DiscoveryResult(
                 careers_url=url,
-                status="found_link",
+                status="careers_page_found",
                 source_url=fetch.final_url or website,
                 http_status=fetch.status_code,
             )
@@ -401,7 +467,13 @@ def discover_careers_page(
     if root and not fetch.error:
         for path in CAREER_PATHS:
             candidate_url = urljoin(root, path.lstrip("/"))
-            candidate_fetch = fetch_url(candidate_url, timeout=timeout)
+            candidate_fetch = fetch_url(
+                candidate_url,
+                timeout=timeout,
+                session=active_session,
+                retries=retries,
+                backoff=backoff,
+            )
             if sleep_seconds:
                 time.sleep(sleep_seconds)
             if looks_usable_page(candidate_fetch):
@@ -411,13 +483,20 @@ def discover_careers_page(
                 if any(term in page_text for term in CAREER_TERMS) or "job" in candidate_url:
                     return DiscoveryResult(
                         careers_url=normalize_url(candidate_fetch.final_url or candidate_url),
-                        status="found_common_path",
+                        status="careers_page_found",
                         source_url=candidate_url,
                         http_status=candidate_fetch.status_code,
                     )
 
+    if fetch.error.startswith("request_failed") or fetch.error.startswith("http_"):
+        status = "request_failed"
+    elif fetch.error in {"invalid_url", "timeout", "blocked", "non_html_response", "redirect_detected"}:
+        status = fetch.error
+    else:
+        status = "careers_page_not_found"
+
     return DiscoveryResult(
-        status="not_found",
+        status=status,
         source_url=fetch.final_url or website,
         http_status=fetch.status_code,
         error=fetch.error,
@@ -448,6 +527,7 @@ def run_discovery(args: argparse.Namespace) -> None:
 
     output_rows: List[Dict[str, str]] = []
     log_rows: List[Dict[str, str]] = []
+    session = create_session()
 
     for row in rows:
         company_name = pick_company_name(row)
@@ -461,6 +541,9 @@ def run_discovery(args: argparse.Namespace) -> None:
             known_url=known_url,
             timeout=args.timeout,
             sleep_seconds=args.sleep,
+            session=session,
+            retries=args.retries,
+            backoff=args.backoff,
         )
 
         out = dict(row)
@@ -522,6 +605,8 @@ def parse_args() -> argparse.Namespace:
         help="Discovery crawl log CSV.",
     )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--retries", type=int, default=2, help="Request retries.")
+    parser.add_argument("--backoff", type=float, default=0.5, help="Retry backoff base seconds.")
     parser.add_argument("--sleep", type=float, default=0.2, help="Seconds between requests.")
     parser.add_argument("--limit", type=int, default=0, help="Limit companies for testing.")
     return parser.parse_args()

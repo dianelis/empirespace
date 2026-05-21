@@ -1,11 +1,16 @@
 import requests
+from argparse import Namespace
 
 import discover_jobs_pages
 from crawl_jobs import (
+    DISCOVERED_FIELDS,
+    FAILED_FIELDS,
     LOG_FIELDS,
     crawl_company,
     fetch_status,
+    is_likely_js_rendered,
     make_log_row,
+    run_crawl,
     write_csv,
 )
 
@@ -16,6 +21,7 @@ class DummyResponse:
         self.text = text
         self.url = url
         self.headers = {"Content-Type": content_type}
+        self.history = []
 
 
 def test_make_log_row_contains_expected_fields():
@@ -32,7 +38,7 @@ def test_make_log_row_contains_expected_fields():
 
 
 def test_crawl_company_no_jobs_found(monkeypatch):
-    def fake_fetch(url, timeout=15):
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
         return discover_jobs_pages.FetchResult(
             url=url,
             final_url=url,
@@ -54,7 +60,7 @@ def test_crawl_company_no_jobs_found(monkeypatch):
 
 
 def test_empty_html_maps_to_parse_error(monkeypatch):
-    def fake_fetch(url, timeout=15):
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
         return discover_jobs_pages.FetchResult(
             url=url,
             final_url=url,
@@ -84,7 +90,7 @@ def test_request_timeout_handling_with_mocked_requests(monkeypatch):
     def raise_timeout(*args, **kwargs):
         raise requests.Timeout("too slow")
 
-    monkeypatch.setattr(discover_jobs_pages.requests, "get", raise_timeout)
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", raise_timeout)
     result = discover_jobs_pages.fetch_url("https://example.com/careers", timeout=1)
     assert result.error == "timeout"
 
@@ -93,7 +99,7 @@ def test_http_error_handling_with_mocked_requests(monkeypatch):
     def return_404(*args, **kwargs):
         return DummyResponse(status_code=404, text="<html>missing</html>", url="https://example.com/missing")
 
-    monkeypatch.setattr(discover_jobs_pages.requests, "get", return_404)
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", return_404)
     result = discover_jobs_pages.fetch_url("https://example.com/missing", timeout=1)
     assert result.error == "http_404"
     assert fetch_status(result.error, result.html) == ("request_failed", "http_404")
@@ -103,9 +109,110 @@ def test_non_html_response_handling_with_mocked_requests(monkeypatch):
     def return_pdf(*args, **kwargs):
         return DummyResponse(status_code=200, text="%PDF", content_type="application/pdf")
 
-    monkeypatch.setattr(discover_jobs_pages.requests, "get", return_pdf)
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", return_pdf)
     result = discover_jobs_pages.fetch_url("https://example.com/file.pdf", timeout=1)
     assert result.error == "non_html_response"
+
+
+def test_blocked_http_status_maps_to_blocked(monkeypatch):
+    def return_429(*args, **kwargs):
+        return DummyResponse(status_code=429, text="<html>rate limit</html>")
+
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", return_429)
+    result = discover_jobs_pages.fetch_url("https://example.com/careers", timeout=1, retries=0)
+    assert result.error == "blocked"
+    assert fetch_status(result.error, result.html) == ("blocked", "blocked_or_rate_limited")
+
+
+def test_redirect_handling_with_mocked_requests(monkeypatch):
+    def return_redirect(*args, **kwargs):
+        response = DummyResponse(url="https://jobs.example.com/openings")
+        response.history = [DummyResponse(status_code=301, url="https://example.com/careers")]
+        return response
+
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", return_redirect)
+    result = discover_jobs_pages.fetch_url("https://example.com/careers", timeout=1, retries=0)
+    assert result.redirected is True
+
+
+def test_redirect_loop_maps_to_redirect_detected(monkeypatch):
+    def raise_redirect_loop(*args, **kwargs):
+        raise requests.TooManyRedirects("loop")
+
+    monkeypatch.setattr(discover_jobs_pages.requests.Session, "get", raise_redirect_loop)
+    result = discover_jobs_pages.fetch_url("https://example.com/careers", timeout=1, retries=0)
+    assert result.error == "redirect_detected"
+
+
+def test_js_heavy_detection():
+    html = """
+    <div id="root"></div>
+    <noscript>Please enable JavaScript to view jobs.</noscript>
+    <script src="/runtime.js"></script><script src="/app.js"></script>
+    """
+    assert is_likely_js_rendered(html, "https://jobs.workdayjobs.com/search") is True
+
+
+def test_crawl_company_js_heavy_status(monkeypatch):
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
+        return discover_jobs_pages.FetchResult(
+            url=url,
+            final_url=url,
+            status_code="200",
+            content_type="text/html",
+            html='<div id="root"></div><noscript>Please enable JavaScript</noscript><script></script><script></script>',
+        )
+
+    monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
+    rows, logs = crawl_company(
+        {"company_name": "Example", "company_website": "https://example.com", "careers_url": "https://jobs.workdayjobs.com/example"},
+        timeout=1,
+        sleep_seconds=0,
+        max_pages=1,
+    )
+    assert rows[0]["status"] == "js_rendered_or_unsupported"
+    assert logs[0]["status"] == "js_rendered_or_unsupported"
+
+
+def test_run_crawl_creates_all_csv_outputs(tmp_path, monkeypatch):
+    input_csv = tmp_path / "companies.csv"
+    input_csv.write_text(
+        "company_name,company_website,careers_url\n"
+        "Example,https://example.com,https://example.com/careers\n",
+        encoding="utf-8",
+    )
+
+    def fake_fetch(url, timeout=15, session=None, retries=2, backoff=0.5):
+        return discover_jobs_pages.FetchResult(
+            url=url,
+            final_url=url,
+            status_code="200",
+            content_type="text/html",
+            html='<a href="/jobs/test-engineer">Test Engineer</a><span>Location: Remote</span>',
+        )
+
+    monkeypatch.setattr("crawl_jobs.fetch_url", fake_fetch)
+    args = Namespace(
+        input=str(input_csv),
+        output=str(tmp_path / "jobs_out.csv"),
+        log=str(tmp_path / "crawl_log.csv"),
+        discovered_pages=str(tmp_path / "discovered_pages.csv"),
+        failed_companies=str(tmp_path / "failed_companies.csv"),
+        timeout=1,
+        retries=0,
+        backoff=0,
+        sleep=0,
+        max_pages_per_company=1,
+        limit=0,
+    )
+    run_crawl(args)
+
+    assert (tmp_path / "jobs_out.csv").exists()
+    assert (tmp_path / "crawl_log.csv").exists()
+    assert (tmp_path / "discovered_pages.csv").exists()
+    assert (tmp_path / "failed_companies.csv").exists()
+    assert (tmp_path / "discovered_pages.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(DISCOVERED_FIELDS)
+    assert (tmp_path / "failed_companies.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(FAILED_FIELDS)
 
 
 def test_log_csv_headers(tmp_path):

@@ -1,5 +1,5 @@
 from discover_jobs_pages import normalize_url, pick_existing_careers_urls
-from crawl_jobs import canonicalize_url
+from crawl_jobs import canonicalize_url, read_company_rows_with_duplicates
 
 
 def test_normalize_url_adds_scheme_and_trims_slash():
@@ -26,3 +26,17 @@ def test_multiple_career_urls_are_collected():
         "https://example.com/jobs",
         "https://boards.example.com/company",
     ]
+
+
+def test_duplicate_companies_are_reported(tmp_path):
+    path = tmp_path / "companies.csv"
+    path.write_text(
+        "company_id,company_name,company_website,careers_url\n"
+        "abc,Example,https://example.com,\n"
+        "abc,Example,https://example.com,https://example.com/careers\n",
+        encoding="utf-8",
+    )
+    rows, duplicates = read_company_rows_with_duplicates(path)
+    assert len(rows) == 1
+    assert len(duplicates) == 1
+    assert rows[0]["careers_url"] == "https://example.com/careers"
