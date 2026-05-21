@@ -46,6 +46,8 @@ For a quick smoke test:
 python crawl_jobs.py --limit 5
 ```
 
+The `--limit` flag is only for testing the crawler path. It will produce a partial `jobs_out.csv` with only the first companies in `data/companies.csv`.
+
 To only discover career pages:
 
 ```bash
@@ -59,6 +61,7 @@ The `client/` app is a static React + Vite dashboard for reviewing NY Space Jobs
 To refresh the dashboard data after a crawl:
 
 ```bash
+python crawl_jobs.py --input data/companies.csv --output jobs_out.csv --log crawl_log.csv
 cp jobs_out.csv client/src/data/jobs_out.csv
 ```
 
