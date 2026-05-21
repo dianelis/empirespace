@@ -100,11 +100,20 @@ python -m compileall .
 - `job_title`
 - `job_url`
 - `location`
+- `city`
+- `state`
+- `country`
+- `remote`
+- `salary_min`
+- `salary_max`
 - `department`
 - `category`
 - `date_found`
+- `last_seen_at`
 - `source_url`
 - `status`
+
+When a posting does not publish a job-specific location, the crawler falls back to the company city from `data/companies.csv` and maps it as `City, NY, United States`. Salary fields are populated only when the source HTML or structured job data exposes compensation.
 
 If no job listings are found for a company, the crawler writes a row with `status` such as `no_jobs_found`, `careers_page_not_found`, `js_rendered_or_unsupported`, `invalid_url`, `request_failed`, `timeout`, `non_html_response`, or `parse_error`.
 

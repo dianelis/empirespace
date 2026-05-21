@@ -12,6 +12,9 @@ const value = (row: RawRow, keys: string[]) => {
   return "";
 };
 
+const hasColumn = (row: RawRow, keys: string[]) =>
+  keys.some((key) => Object.prototype.hasOwnProperty.call(row, key));
+
 const titleCase = (text: string) =>
   text
     .split(/[\s_-]+/)
@@ -38,12 +41,31 @@ const locationParts = (location: string) => {
   };
 };
 
+const formatSalary = (rawValue: string) => {
+  const value = rawValue.trim();
+  if (!value) return "";
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return value;
+
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return value;
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
+  }).format(amount);
+};
+
 const normalizeRow = (row: RawRow, index: number): Job | null => {
   const company = value(row, ["company_name", "organization_name", "company"]);
   const title = value(row, ["job_title", "title"]);
   const applyUrl = value(row, ["job_url", "apply_url", "canonical_job_url", "source_job_url"]);
   const location = value(row, ["location", "location_text"]);
   const parts = locationParts(location);
+  const hasStructuredLocation =
+    hasColumn(row, ["location_city", "city"]) ||
+    hasColumn(row, ["location_state", "state"]) ||
+    hasColumn(row, ["location_country", "country"]);
   const status = value(row, ["status", "detail_fetch_status"]);
 
   if (!title) return null;
@@ -54,12 +76,12 @@ const normalizeRow = (row: RawRow, index: number): Job | null => {
     category: value(row, ["category", "company_category"]),
     title,
     location,
-    city: value(row, ["location_city", "city"]) || parts.city,
-    state: value(row, ["location_state", "state"]) || parts.state,
-    country: value(row, ["location_country", "country"]) || parts.country,
+    city: value(row, ["location_city", "city"]) || (hasStructuredLocation ? "" : parts.city),
+    state: value(row, ["location_state", "state"]) || (hasStructuredLocation ? "" : parts.state),
+    country: value(row, ["location_country", "country"]) || (hasStructuredLocation ? "" : parts.country),
     remote: inferRemote(row, location),
-    salaryMin: value(row, ["salary_min", "salaryMin"]),
-    salaryMax: value(row, ["salary_max", "salaryMax"]),
+    salaryMin: formatSalary(value(row, ["salary_min", "salaryMin"])),
+    salaryMax: formatSalary(value(row, ["salary_max", "salaryMax"])),
     lastSeenAt: value(row, ["last_seen_at", "date_found", "found_at"]),
     applyUrl,
     status,

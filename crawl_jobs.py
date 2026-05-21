@@ -38,9 +38,16 @@ OUTPUT_FIELDS = [
     "job_title",
     "job_url",
     "location",
+    "city",
+    "state",
+    "country",
+    "remote",
+    "salary_min",
+    "salary_max",
     "department",
     "category",
     "date_found",
+    "last_seen_at",
     "source_url",
     "status",
 ]
@@ -218,6 +225,82 @@ KEEP_QUERY_KEYS = {
     "position",
 }
 
+STATE_NAMES = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "district of columbia": "DC",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+}
+
+STATE_CODES = set(STATE_NAMES.values())
+
+COUNTRY_ALIASES = {
+    "usa": "United States",
+    "us": "United States",
+    "u.s.": "United States",
+    "u.s.a.": "United States",
+    "united states of america": "United States",
+}
+
+REMOTE_HINT_RE = re.compile(r"\b(remote|telecommute|work from home)\b", re.I)
+HYBRID_HINT_RE = re.compile(r"\bhybrid\b", re.I)
+ONSITE_HINT_RE = re.compile(r"\b(on-site|onsite|in office)\b", re.I)
+
+SALARY_RANGE_RE = re.compile(
+    r"\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kK])?\s*"
+    r"(?:-|–|—|to)\s*"
+    r"\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kK])?",
+    re.I,
+)
+SALARY_SINGLE_RE = re.compile(r"\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*([kK])?", re.I)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -337,6 +420,158 @@ def format_jsonld_location(value: Any) -> str:
     return clean_text(str(address))
 
 
+def format_salary_amount(raw_value: Any, multiplier_hint: str = "") -> str:
+    value = clean_text(str(raw_value or ""))
+    if not value:
+        return ""
+
+    value = value.replace("$", "").replace(",", "")
+    match = re.search(r"\d+(?:\.\d+)?", value)
+    if not match:
+        return ""
+
+    number = float(match.group(0))
+    if multiplier_hint.lower() == "k" or "k" in value.lower():
+        number *= 1000
+
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def extract_jsonld_salary(item: Dict[str, Any]) -> Tuple[str, str]:
+    salary = item.get("baseSalary")
+    if not salary:
+        return "", ""
+    if isinstance(salary, list):
+        salary = salary[0] if salary else {}
+    if not isinstance(salary, dict):
+        amount = format_salary_amount(salary)
+        return amount, amount
+
+    value = salary.get("value", salary)
+    if isinstance(value, list):
+        value = value[0] if value else {}
+    if isinstance(value, dict):
+        min_value = format_salary_amount(value.get("minValue") or value.get("min_value"))
+        max_value = format_salary_amount(value.get("maxValue") or value.get("max_value"))
+        exact_value = format_salary_amount(value.get("value"))
+        return min_value or exact_value, max_value or exact_value
+
+    amount = format_salary_amount(value)
+    return amount, amount
+
+
+def extract_salary_range(text: str) -> Tuple[str, str]:
+    text = clean_text(text)
+    if not text:
+        return "", ""
+    if not re.search(r"\b(salary|compensation|pay\s+range|base\s+pay|wage|hourly|annual)\b", text, re.I):
+        return "", ""
+
+    match = SALARY_RANGE_RE.search(text)
+    if match:
+        low = format_salary_amount(match.group(1), match.group(2) or "")
+        high = format_salary_amount(match.group(3), match.group(4) or "")
+        return low, high
+
+    match = SALARY_SINGLE_RE.search(text)
+    if match:
+        amount = format_salary_amount(match.group(1), match.group(2) or "")
+        return amount, amount
+
+    return "", ""
+
+
+def normalize_country(value: str) -> str:
+    value = clean_text(value)
+    return COUNTRY_ALIASES.get(value.lower(), value)
+
+
+def normalize_state(value: str) -> str:
+    value = clean_text(value)
+    if not value:
+        return ""
+    upper = value.upper()
+    if upper in STATE_CODES:
+        return upper
+    return STATE_NAMES.get(value.lower(), value)
+
+
+def strip_location_label(value: str) -> str:
+    value = clean_text(value)
+    value = re.sub(r"^(job\s+)?location\s*[:\-]\s*", "", value, flags=re.I)
+    value = re.sub(r"^(city|office|locations)\s*[:\-]\s*", "", value, flags=re.I)
+    return clean_text(value)
+
+
+def fallback_company_location(row: Dict[str, str]) -> str:
+    city = clean_text(row.get("location", ""))
+    if not city:
+        return ""
+    return f"{city}, NY, United States"
+
+
+def infer_remote_status(location: str, text: str = "") -> str:
+    combined = f"{location} {text}"
+    if REMOTE_HINT_RE.search(combined):
+        return "Remote"
+    if HYBRID_HINT_RE.search(combined):
+        return "Hybrid"
+    if ONSITE_HINT_RE.search(combined):
+        return "On-site"
+    return "Not specified"
+
+
+def parse_location_fields(location: str, row: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    location = strip_location_label(location)
+    if not location and row:
+        location = fallback_company_location(row)
+
+    if not location:
+        return {"location": "", "city": "", "state": "", "country": ""}
+
+    if REMOTE_HINT_RE.fullmatch(location):
+        return {"location": location, "city": "", "state": "", "country": ""}
+
+    first_location = re.split(r"\s*(?:;|\||/)\s*", location, maxsplit=1)[0]
+    parts = [strip_location_label(part) for part in first_location.split(",")]
+    parts = [part for part in parts if part]
+
+    city = ""
+    state = ""
+    country = ""
+
+    if len(parts) >= 3:
+        city = parts[0]
+        state = normalize_state(parts[1])
+        country = normalize_country(parts[2])
+    elif len(parts) == 2:
+        city = parts[0]
+        second = normalize_country(parts[1])
+        if second.lower() in {"united states", "united kingdom", "canada"}:
+            country = second
+        else:
+            state = normalize_state(parts[1])
+            country = "United States" if state in STATE_CODES else ""
+    elif len(parts) == 1:
+        single = normalize_country(parts[0])
+        if single.lower() in {"remote", "united states", "united kingdom", "canada"}:
+            country = "" if single.lower() == "remote" else single
+        else:
+            city = parts[0]
+            if row and clean_text(row.get("location", "")).lower() == city.lower():
+                state = "NY"
+                country = "United States"
+
+    return {
+        "location": location,
+        "city": city,
+        "state": state,
+        "country": country,
+    }
+
+
 def extract_jsonld_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, str]]:
     jobs: List[Dict[str, str]] = []
     for script in soup.find_all("script", attrs={"type": re.compile("ld\\+json", re.I)}):
@@ -364,11 +599,17 @@ def extract_jsonld_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
                 continue
 
             job_url = canonicalize_url(str(item.get("url") or page_url))
+            location = format_jsonld_location(item.get("jobLocation"))
+            salary_min, salary_max = extract_jsonld_salary(item)
+            remote = "Remote" if clean_text(str(item.get("jobLocationType", ""))).upper() == "TELECOMMUTE" else infer_remote_status(location)
             jobs.append(
                 {
                     "job_title": title,
                     "job_url": job_url,
-                    "location": format_jsonld_location(item.get("jobLocation")),
+                    "location": location,
+                    "remote": remote,
+                    "salary_min": salary_min,
+                    "salary_max": salary_max,
                     "department": clean_text(
                         str(item.get("occupationalCategory") or item.get("industry") or "")
                     ),
@@ -422,6 +663,31 @@ def tag_lines(tag: Any) -> List[str]:
         return []
     lines = [clean_text(item) for item in tag.stripped_strings]
     return [line for line in lines if line]
+
+
+def anchor_context_lines(anchor: Any) -> List[str]:
+    best_lines = tag_lines(anchor.parent) if anchor.parent else []
+    for parent in anchor.parents:
+        if getattr(parent, "name", "") in {"body", "html"}:
+            break
+
+        classes = " ".join(parent.get("class", [])) if hasattr(parent, "get") else ""
+        identifier = parent.get("id", "") if hasattr(parent, "get") else ""
+        descriptor = f"{classes} {identifier}".lower()
+        lines = tag_lines(parent)
+        if not lines:
+            continue
+
+        is_likely_card = (
+            parent.name in {"li", "tr", "article"}
+            or any(term in descriptor for term in ("job", "career", "opening", "position", "requisition"))
+        )
+        if is_likely_card and len(lines) <= 60:
+            return lines
+        if len(lines) <= 20 and len(" ".join(lines)) <= 1800:
+            best_lines = lines
+
+    return best_lines
 
 
 def title_from_anchor(anchor: Any, url: str) -> str:
@@ -545,6 +811,23 @@ def extract_department(lines: List[str]) -> str:
     return clean_text(match.group(1)) if match else ""
 
 
+def extract_location_from_url(url: str) -> str:
+    try:
+        path = urlparse(url).path
+    except ValueError:
+        return ""
+
+    match = re.search(
+        r"/job/([A-Za-z][A-Za-z-]+)-([A-Z]{2})-\d{4,}/",
+        path,
+    )
+    if not match:
+        return ""
+    city = match.group(1).replace("-", " ").title()
+    state = match.group(2)
+    return f"{city}, {state}, United States"
+
+
 def extract_anchor_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, str]]:
     jobs: List[Dict[str, str]] = []
     for anchor in soup.find_all("a", href=True):
@@ -557,7 +840,7 @@ def extract_anchor_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
             continue
 
         text = clean_text(anchor.get_text(" ", strip=True))
-        parent_lines = tag_lines(anchor.parent) if anchor.parent else []
+        parent_lines = anchor_context_lines(anchor)
         parent_text = " ".join(parent_lines[:10])
         if not looks_like_job_url(url) and not looks_like_job_text(text + " " + parent_text):
             continue
@@ -566,11 +849,16 @@ def extract_anchor_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
         if not title:
             continue
 
+        salary_min, salary_max = extract_salary_range(parent_text)
+        location = extract_location(parent_lines) or extract_location_from_url(url)
         jobs.append(
             {
                 "job_title": title,
                 "job_url": url,
-                "location": extract_location(parent_lines),
+                "location": location,
+                "remote": infer_remote_status(location, parent_text),
+                "salary_min": salary_min,
+                "salary_max": salary_max,
                 "department": extract_department(parent_lines),
                 "source_url": page_url,
                 "status": "found",
@@ -635,13 +923,21 @@ def make_status_row(
     status: str,
 ) -> Dict[str, str]:
     base = company_output_base(row, careers_url)
+    location_fields = parse_location_fields("", row)
     base.update(
         {
             "job_title": "",
             "job_url": "",
-            "location": "",
+            "location": location_fields["location"],
+            "city": location_fields["city"],
+            "state": location_fields["state"],
+            "country": location_fields["country"],
+            "remote": "Not specified",
+            "salary_min": "",
+            "salary_max": "",
             "department": "",
             "date_found": today_utc(),
+            "last_seen_at": today_utc(),
             "source_url": source_url,
             "status": status,
         }
@@ -905,13 +1201,22 @@ def crawl_company(
     output_rows: List[Dict[str, str]] = []
     for job in found_jobs:
         base = company_output_base(row, careers_url_display)
+        location_fields = parse_location_fields(job.get("location", ""), row)
+        remote = job.get("remote", "") or infer_remote_status(location_fields["location"])
         base.update(
             {
                 "job_title": job.get("job_title", ""),
                 "job_url": job.get("job_url", ""),
-                "location": job.get("location", ""),
+                "location": location_fields["location"],
+                "city": location_fields["city"],
+                "state": location_fields["state"],
+                "country": location_fields["country"],
+                "remote": remote,
+                "salary_min": job.get("salary_min", ""),
+                "salary_max": job.get("salary_max", ""),
                 "department": job.get("department", ""),
                 "date_found": today_utc(),
+                "last_seen_at": today_utc(),
                 "source_url": job.get("source_url", careers_url_display),
                 "status": "success",
             }
