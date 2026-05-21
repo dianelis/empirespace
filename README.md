@@ -13,8 +13,10 @@ The scraper uses only `requests` and `BeautifulSoup4` for web scraping. It does 
 - `crawl_log.csv` - generated request/status log.
 - `output/discovered_pages.csv` - generated career page inventory for later manual/API review.
 - `output/failed_companies.csv` - generated non-success company summary.
+- `client/` - static React dashboard for reviewing the scraped CSV output.
 - `tests/` - pytest coverage for URL handling, parsing, logging, and request failures.
 - `.github/workflows/tests.yml` - GitHub Actions workflow that runs syntax checks and pytest.
+- `.github/workflows/deploy-client.yml` - GitHub Pages deployment workflow for the React dashboard.
 
 ## Setup
 
@@ -49,6 +51,33 @@ To only discover career pages:
 ```bash
 python discover_jobs_pages.py --input data/companies.csv --output output/companies_with_careers.csv --log output/discovery_log.csv
 ```
+
+## Frontend Dashboard
+
+The `client/` app is a static React + Vite dashboard for reviewing NY Space Jobs from a committed CSV snapshot.
+
+To refresh the dashboard data after a crawl:
+
+```bash
+cp jobs_out.csv client/src/data/jobs_out.csv
+```
+
+To run it locally:
+
+```bash
+cd client
+npm install
+npm run dev
+```
+
+To build the GitHub Pages version:
+
+```bash
+cd client
+npm run build
+```
+
+The dashboard reads `client/src/data/jobs_out.csv`, shows stats, client-side search, filters, and clickable apply links. It is frontend-only: no Streamlit, backend, or MySQL connection is used.
 
 ## Test
 
