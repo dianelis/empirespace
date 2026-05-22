@@ -63,7 +63,7 @@ def test_snapshot_storage_updates_history_and_analytics(tmp_path):
             {
                 "company_name": "Company A",
                 "job_title": "Test Engineer",
-                "job_url": "",
+                "job_url": "https://example.com/jobs/test-engineer",
                 "location": "Rochester, NY, United States",
                 "city": "Rochester",
                 "state": "NY",

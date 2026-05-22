@@ -6,6 +6,7 @@ from crawl_jobs import (
     DISCOVERED_FIELDS,
     FAILED_FIELDS,
     LOG_FIELDS,
+    REJECTED_FIELDS,
     crawl_company,
     fetch_status,
     is_likely_js_rendered,
@@ -289,6 +290,7 @@ def test_run_crawl_creates_all_csv_outputs(tmp_path, monkeypatch):
         log=str(tmp_path / "crawl_log.csv"),
         discovered_pages=str(tmp_path / "discovered_pages.csv"),
         failed_companies=str(tmp_path / "failed_companies.csv"),
+        rejected_candidates=str(tmp_path / "rejected_candidates.csv"),
         timeout=1,
         retries=0,
         backoff=0,
@@ -302,8 +304,10 @@ def test_run_crawl_creates_all_csv_outputs(tmp_path, monkeypatch):
     assert (tmp_path / "crawl_log.csv").exists()
     assert (tmp_path / "discovered_pages.csv").exists()
     assert (tmp_path / "failed_companies.csv").exists()
+    assert (tmp_path / "rejected_candidates.csv").exists()
     assert (tmp_path / "discovered_pages.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(DISCOVERED_FIELDS)
     assert (tmp_path / "failed_companies.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(FAILED_FIELDS)
+    assert (tmp_path / "rejected_candidates.csv").read_text(encoding="utf-8").splitlines()[0] == ",".join(REJECTED_FIELDS)
 
 
 def test_log_csv_headers(tmp_path):

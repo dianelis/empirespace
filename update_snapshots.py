@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
-from crawl_jobs import OUTPUT_FIELDS, add_tracking_fields, canonicalize_url, clean_text
+from crawl_jobs import (
+    OUTPUT_FIELDS,
+    add_tracking_fields,
+    canonicalize_url,
+    clean_text,
+    is_valid_job_posting,
+)
 
 
 SUMMARY_FIELDS = [
@@ -85,6 +91,17 @@ def normalize_snapshot_rows(rows: List[Dict[str, str]], snapshot_date: str) -> L
     for row in rows:
         normalized.append({field: row.get(field, "") for field in OUTPUT_FIELDS})
 
+    validated = []
+    for row in normalized:
+        if not is_job_row(row):
+            continue
+        candidate = dict(row)
+        candidate.setdefault("context_text", "")
+        if is_valid_job_posting(candidate):
+            row["job_url"] = candidate.get("job_url", row.get("job_url", ""))
+            row["job_confidence_score"] = candidate.get("job_confidence_score", "")
+            validated.append(row)
+    normalized = validated
     add_tracking_fields(normalized, snapshot_date)
     return dedupe_rows(normalized)
 

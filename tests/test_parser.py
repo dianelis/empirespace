@@ -81,9 +81,93 @@ def test_missing_optional_fields_are_blank_or_filled_safely():
             "salary_max": "",
             "department": "",
             "source_url": "https://example.com/careers",
+            "job_confidence_score": "3",
             "status": "found",
         }
     ]
+
+
+def test_rejects_generic_company_pages_as_jobs():
+    html = """
+    <nav>
+      <a href="/about">About</a>
+      <a href="/team">Team</a>
+      <a href="/contact">Contact</a>
+      <a href="/careers">Careers</a>
+      <a href="/careers/open-positions">Open Positions</a>
+      <a href="/news/aerospace-product-launch">Aerospace Product Launch</a>
+      <a href="/products/orbital-platform">Product</a>
+      <a href="/apply">Apply</a>
+    </nav>
+    """
+    rejected = []
+    jobs = extract_jobs_from_html(html, "https://example.com/careers", rejected_candidates=rejected)
+    rejected_titles = {row["candidate_title"].lower() for row in rejected}
+    rejected_urls = {row["candidate_url"] for row in rejected}
+
+    assert jobs == []
+    assert "about" in rejected_titles
+    assert "team" in rejected_titles
+    assert "contact" in rejected_titles
+    assert "careers" in rejected_titles
+    assert "open positions" in rejected_titles
+    assert "aerospace product launch" in rejected_titles
+    assert "product" in rejected_titles
+    assert any(url.endswith("/apply") for url in rejected_urls)
+
+
+def test_accepts_valid_job_cards_and_ats_links():
+    html = """
+    <section class="jobs">
+      <article class="job-card">
+        <a href="/jobs/software-engineer">Software Engineer</a>
+        <span>Location: Brooklyn, NY</span>
+        <span>Apply now</span>
+      </article>
+      <article class="job-card">
+        <a href="/openings/mechanical-engineer">Mechanical Engineer</a>
+        <span>Requirements: propulsion systems</span>
+      </article>
+      <article class="opening">
+        <a href="https://boards.greenhouse.io/example/jobs/123">Avionics Engineer</a>
+      </article>
+      <article class="posting">
+        <a href="https://jobs.lever.co/example/jobs/abc">Operations Manager</a>
+      </article>
+    </section>
+    """
+    jobs = extract_jobs_from_html(html, "https://example.com/careers")
+    titles = {job["job_title"] for job in jobs}
+
+    assert "Software Engineer" in titles
+    assert "Mechanical Engineer" in titles
+    assert "Avionics Engineer" in titles
+    assert "Operations Manager" in titles
+    assert all(int(job["job_confidence_score"]) >= 3 for job in jobs)
+
+
+def test_jsonld_jobposting_and_apply_card_are_valid():
+    html = """
+    <script type="application/ld+json">
+      {
+        "@type": "JobPosting",
+        "title": "Aerospace Scientist",
+        "url": "https://example.com/jobs/aerospace-scientist",
+        "jobLocation": {"address": {"addressLocality": "Rochester", "addressRegion": "NY"}}
+      }
+    </script>
+    <article class="role-card">
+      <h2>Electrical Technician</h2>
+      <p>Location: Buffalo, NY</p>
+      <p>Responsibilities include spacecraft test operations.</p>
+      <a href="/roles/electrical-technician">Apply</a>
+    </article>
+    """
+    jobs = extract_jobs_from_html(html, "https://example.com/careers")
+    titles = {job["job_title"] for job in jobs}
+
+    assert "Aerospace Scientist" in titles
+    assert "Electrical Technician" in titles
 
 
 def test_location_fields_are_parsed_from_job_location():

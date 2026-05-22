@@ -64,6 +64,7 @@ jobs:
             --log crawl_log.csv \
             --discovered-pages output/discovered_pages.csv \
             --failed-companies output/failed_companies.csv \
+            --rejected-candidates output/rejected_candidates.csv \
             --timeout 15 \
             --retries 2 \
             --backoff 0.5 \
@@ -89,6 +90,7 @@ jobs:
             crawl_log.csv
             output/discovered_pages.csv
             output/failed_companies.csv
+            output/rejected_candidates.csv
           if-no-files-found: ignore
 
       - name: Commit refreshed data

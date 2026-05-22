@@ -52,6 +52,7 @@ OUTPUT_FIELDS = [
     "last_seen_at",
     "source_url",
     "discovery_method",
+    "job_confidence_score",
     "status",
 ]
 
@@ -72,6 +73,15 @@ DISCOVERED_FIELDS = [
     "discovery_method",
     "confidence_score",
     "timestamp",
+]
+
+REJECTED_FIELDS = [
+    "company_name",
+    "candidate_title",
+    "candidate_url",
+    "rejection_reason",
+    "confidence_score",
+    "source_url",
 ]
 
 FAILED_FIELDS = [
@@ -96,13 +106,15 @@ FAILURE_STATUSES = {
     "unsupported_structure",
     "careers_url_failed",
     "fallback_url_failed",
+    "no_jobs_found",
 }
 
 JOB_TITLE_WORD_RE = re.compile(
     r"\b("
     r"engineer|engineering|developer|designer|manager|director|analyst|scientist|"
     r"technician|operator|specialist|associate|coordinator|administrator|architect|"
-    r"assistant|consultant|lead|leader|intern|internship|recruiter"
+    r"assistant|consultant|lead|leader|intern|internship|recruiter|sales|operations|"
+    r"product|software|mechanical|electrical|aerospace|propulsion|avionics"
     r")s?\b",
     re.I,
 )
@@ -127,7 +139,50 @@ GENERIC_TITLES = {
     "read more",
     "join us",
     "join our team",
+    "work with us",
+    "company careers",
+    "life at company",
+    "view details",
 }
+
+GENERIC_CAREERS_TITLES = GENERIC_TITLES | {
+    "openings",
+    "opening",
+    "roles",
+    "open role",
+    "current openings",
+    "current roles",
+    "life at",
+    "life at our company",
+    "life at company",
+    "company careers",
+    "our careers",
+    "explore careers",
+}
+
+APPLICATION_SIGNAL_RE = re.compile(
+    r"\b("
+    r"apply|apply now|submit application|job description|responsibilities|qualifications|"
+    r"requirements|compensation|salary|full[- ]time|part[- ]time|internship|contract|"
+    r"remote|hybrid|onsite|on-site"
+    r")\b",
+    re.I,
+)
+
+JOB_PATH_RE = re.compile(
+    r"("
+    r"/jobs?/|/careers?/|/careers?/job|/careers?/jobs?|/positions?/|/openings?/|/roles?/|"
+    r"/greenhouse/|/lever/|/ashby/|/workable/|/smartrecruiters/|"
+    r"greenhouse\.io/.*/jobs?/|lever\.co/.*/jobs?/|ashbyhq\.com/.*/job/|"
+    r"workable\.com/.*/jobs?/|smartrecruiters\.com/.*/jobs?/|gh_jid="
+    r")",
+    re.I,
+)
+
+JOB_DETAIL_ID_RE = re.compile(
+    r"/(?:jobs?|positions?|openings?|roles?)/\d{3,}(?:[-/]|$)",
+    re.I,
+)
 
 JOB_URL_HINTS = (
     "/job/",
@@ -264,10 +319,42 @@ UNSUPPORTED_CAREER_HOST_HINTS = (
 )
 
 BAD_JOB_URL_RE = re.compile(
-    r"(privacy|terms|cookie|login|signin|sign-in|register|account|talent-community|newsletter"
+    r"(privacy|terms|cookie|login|signin|sign-in|register|talent-community|newsletter"
     r"|facebook\.com|instagram\.com|youtube\.com|twitter\.com|x\.com)",
     re.I,
 )
+
+NEGATIVE_PAGE_TERMS = {
+    "about",
+    "team",
+    "contact",
+    "blog",
+    "news",
+    "press",
+    "events",
+    "investors",
+    "mission",
+    "product",
+    "products",
+    "services",
+    "privacy",
+    "terms",
+    "cookie",
+    "login",
+    "signup",
+    "sign-up",
+    "donate",
+    "partners",
+    "customers",
+    "case studies",
+    "case-studies",
+    "resources",
+    "whitepaper",
+    "faq",
+    "support",
+    "home",
+    "index",
+}
 
 DROP_QUERY_PREFIXES = ("utm_",)
 DROP_QUERY_KEYS = {"fbclid", "gclid", "msclkid", "_gl", "ref", "source", "campaign"}
@@ -638,7 +725,11 @@ def parse_location_fields(location: str, row: Optional[Dict[str, str]] = None) -
     }
 
 
-def extract_jsonld_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, str]]:
+def extract_jsonld_jobs(
+    soup: BeautifulSoup,
+    page_url: str,
+    rejected_candidates: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     jobs: List[Dict[str, str]] = []
     for script in soup.find_all("script", attrs={"type": re.compile("ld\\+json", re.I)}):
         raw = script.string or script.get_text("", strip=True)
@@ -662,27 +753,43 @@ def extract_jsonld_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
 
             title = clean_job_title(clean_text(str(item.get("title", ""))))
             if not title:
+                if rejected_candidates is not None:
+                    rejected_candidates.append(
+                        rejection_row(
+                            {
+                                "job_title": clean_text(str(item.get("title", ""))),
+                                "job_url": canonicalize_url(str(item.get("url") or page_url)),
+                                "source_url": page_url,
+                                "rejection_reason": "generic_title",
+                                "job_confidence_score": "-2",
+                            }
+                        )
+                    )
                 continue
 
             job_url = canonicalize_url(str(item.get("url") or page_url))
             location = format_jsonld_location(item.get("jobLocation"))
             salary_min, salary_max = extract_jsonld_salary(item)
             remote = "Remote" if clean_text(str(item.get("jobLocationType", ""))).upper() == "TELECOMMUTE" else infer_remote_status(location)
-            jobs.append(
-                {
-                    "job_title": title,
-                    "job_url": job_url,
-                    "location": location,
-                    "remote": remote,
-                    "salary_min": salary_min,
-                    "salary_max": salary_max,
-                    "department": clean_text(
-                        str(item.get("occupationalCategory") or item.get("industry") or "")
-                    ),
-                    "source_url": page_url,
-                    "status": "found",
-                }
-            )
+            candidate = {
+                "job_title": title,
+                "job_url": job_url,
+                "location": location,
+                "remote": remote,
+                "salary_min": salary_min,
+                "salary_max": salary_max,
+                "department": clean_text(
+                    str(item.get("occupationalCategory") or item.get("industry") or "")
+                ),
+                "source_url": page_url,
+                "context_text": clean_text(json.dumps(item, ensure_ascii=False)),
+                "structured_data": True,
+                "status": "found",
+            }
+            if is_valid_job_posting(candidate):
+                jobs.append(accepted_job_row(candidate))
+            elif rejected_candidates is not None:
+                rejected_candidates.append(rejection_row(candidate))
 
     return jobs
 
@@ -732,10 +839,16 @@ def tag_lines(tag: Any) -> List[str]:
 
 
 def anchor_context_lines(anchor: Any) -> List[str]:
-    best_lines = tag_lines(anchor.parent) if anchor.parent else []
+    ignored_containers = {"nav", "header", "footer", "aside"}
+    if anchor.parent and getattr(anchor.parent, "name", "") not in ignored_containers:
+        best_lines = tag_lines(anchor.parent)
+    else:
+        best_lines = []
     for parent in anchor.parents:
         if getattr(parent, "name", "") in {"body", "html"}:
             break
+        if getattr(parent, "name", "") in ignored_containers:
+            continue
 
         classes = " ".join(parent.get("class", [])) if hasattr(parent, "get") else ""
         identifier = parent.get("id", "") if hasattr(parent, "get") else ""
@@ -764,7 +877,7 @@ def title_from_anchor(anchor: Any, url: str) -> str:
     ]
 
     parent = anchor.parent
-    if parent:
+    if parent and getattr(parent, "name", "") not in {"nav", "header", "footer", "aside"}:
         for line in tag_lines(parent)[:8]:
             possible.append(line)
 
@@ -780,6 +893,182 @@ def contains_job_title_word(text: str) -> bool:
     return bool(JOB_TITLE_WORD_RE.search(text or ""))
 
 
+def url_has_job_path(url: str) -> bool:
+    return bool(JOB_PATH_RE.search(url or ""))
+
+
+def url_has_job_detail_id(url: str) -> bool:
+    return bool(JOB_DETAIL_ID_RE.search(url or ""))
+
+
+def has_application_signal(text: str) -> bool:
+    return bool(APPLICATION_SIGNAL_RE.search(text or ""))
+
+
+def title_is_generic(title: str, company_name: str = "") -> bool:
+    title_l = clean_text(title).lower()
+    if not title_l or len(title_l) < 3:
+        return True
+    if title_l in GENERIC_CAREERS_TITLES:
+        return True
+    if len(title_l.split()) == 1 and title_l in GENERIC_CAREERS_TITLES:
+        return True
+    company_l = clean_text(company_name).lower()
+    return bool(company_l and title_l == company_l)
+
+
+def title_has_negative_page_signal(title: str) -> bool:
+    title_l = normalize_identity_part(title)
+    if not title_l:
+        return False
+    if title_l in {term.replace("-", " ") for term in NEGATIVE_PAGE_TERMS}:
+        return True
+    return title_l in {
+        "about us",
+        "our team",
+        "contact us",
+        "latest news",
+        "press releases",
+        "our mission",
+        "our products",
+        "products",
+        "services",
+        "case studies",
+        "resources",
+        "support",
+        "home",
+        "index",
+    }
+
+
+def url_has_negative_page_signal(url: str) -> bool:
+    if not url:
+        return False
+    if BAD_JOB_URL_RE.search(url):
+        return True
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return True
+
+    path_l = parsed.path.lower().strip("/")
+    if not path_l:
+        return False
+
+    segments = [segment for segment in re.split(r"/+", path_l) if segment]
+    negative_segments = {term for term in NEGATIVE_PAGE_TERMS if " " not in term and "-" not in term}
+    for segment in segments:
+        normalized = segment.strip()
+        normalized_words = normalize_identity_part(normalized)
+        if normalized in negative_segments:
+            return True
+        if normalized_words in {term.replace("-", " ") for term in NEGATIVE_PAGE_TERMS}:
+            return True
+    return False
+
+
+def has_negative_page_signal(title: str, url: str) -> bool:
+    if title_has_negative_page_signal(title):
+        return True
+    if url_has_negative_page_signal(url):
+        return True
+    return False
+
+
+def calculate_job_confidence(candidate: Dict[str, Any]) -> Tuple[int, List[str]]:
+    title = clean_text(candidate.get("job_title", ""))
+    url = canonicalize_url(clean_text(candidate.get("job_url", "")))
+    context_text = clean_text(candidate.get("context_text", ""))
+    source_url = clean_text(candidate.get("source_url", ""))
+    location = clean_text(candidate.get("location", ""))
+    company_name = clean_text(candidate.get("company_name", ""))
+    structured_data = bool(candidate.get("structured_data"))
+    score = 0
+    reasons: List[str] = []
+
+    if structured_data:
+        score += 2
+        reasons.append("structured_jobposting")
+    if contains_job_title_word(title):
+        score += 1
+        reasons.append("job_title_keyword")
+    if url_has_job_path(url):
+        score += 1
+        reasons.append("job_url_path")
+    if url_has_job_detail_id(url):
+        score += 1
+        reasons.append("job_detail_id")
+    if has_application_signal(context_text):
+        score += 1
+        reasons.append("application_context")
+    if location:
+        score += 1
+        reasons.append("location_detected")
+    if is_ats_url(url) and url_has_job_path(url):
+        score += 1
+        reasons.append("ats_job_link")
+
+    if title_is_generic(title, company_name):
+        score -= 2
+        reasons.append("generic_title")
+    if has_negative_page_signal(title, url):
+        score -= 2
+        reasons.append("negative_page_keyword")
+    if source_url and has_negative_page_signal("", source_url) and not url_has_job_path(url):
+        score -= 1
+        reasons.append("negative_source_page")
+
+    return score, reasons
+
+
+def is_valid_job_posting(candidate: Dict[str, Any]) -> bool:
+    if candidate.get("job_url"):
+        candidate["job_url"] = canonicalize_url(candidate.get("job_url", ""))
+    score, reasons = calculate_job_confidence(candidate)
+    candidate["job_confidence_score"] = str(score)
+    candidate["rejection_reason"] = ";".join(reasons)
+
+    if title_is_generic(candidate.get("job_title", ""), candidate.get("company_name", "")):
+        candidate["rejection_reason"] = "generic_title"
+        return False
+    if has_negative_page_signal(
+        candidate.get("job_title", ""),
+        canonicalize_url(candidate.get("job_url", "")),
+    ):
+        candidate["rejection_reason"] = "negative_page_keyword"
+        return False
+    if score < 3:
+        candidate["rejection_reason"] = candidate.get("rejection_reason") or "low_confidence"
+        return False
+    return True
+
+
+def rejection_row(candidate: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "company_name": clean_text(candidate.get("company_name", "")),
+        "candidate_title": clean_text(candidate.get("job_title", "")),
+        "candidate_url": clean_text(candidate.get("job_url", "")),
+        "rejection_reason": clean_text(candidate.get("rejection_reason", "")),
+        "confidence_score": clean_text(candidate.get("job_confidence_score", "")),
+        "source_url": clean_text(candidate.get("source_url", "")),
+    }
+
+
+def accepted_job_row(candidate: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "job_title": clean_text(candidate.get("job_title", "")),
+        "job_url": clean_text(candidate.get("job_url", "")),
+        "location": clean_text(candidate.get("location", "")),
+        "remote": clean_text(candidate.get("remote", "")),
+        "salary_min": clean_text(candidate.get("salary_min", "")),
+        "salary_max": clean_text(candidate.get("salary_max", "")),
+        "department": clean_text(candidate.get("department", "")),
+        "source_url": clean_text(candidate.get("source_url", "")),
+        "job_confidence_score": clean_text(candidate.get("job_confidence_score", "")),
+        "status": clean_text(candidate.get("status", "")),
+    }
+
+
 def looks_like_job_url(url: str) -> bool:
     url_l = url.lower()
     if BAD_JOB_URL_RE.search(url_l):
@@ -788,7 +1077,7 @@ def looks_like_job_url(url: str) -> bool:
         return False
     if "teamtailor.com" in urlparse(url).netloc.lower() and "jobs" not in url_l:
         return False
-    return any(hint in url_l for hint in JOB_URL_HINTS)
+    return any(hint in url_l for hint in JOB_URL_HINTS) or url_has_job_path(url)
 
 
 def looks_like_job_text(text: str) -> bool:
@@ -894,7 +1183,11 @@ def extract_location_from_url(url: str) -> str:
     return f"{city}, {state}, United States"
 
 
-def extract_anchor_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, str]]:
+def extract_anchor_jobs(
+    soup: BeautifulSoup,
+    page_url: str,
+    rejected_candidates: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     jobs: List[Dict[str, str]] = []
     for anchor in soup.find_all("a", href=True):
         href = clean_text(anchor.get("href", ""))
@@ -908,36 +1201,64 @@ def extract_anchor_jobs(soup: BeautifulSoup, page_url: str) -> List[Dict[str, st
         text = clean_text(anchor.get_text(" ", strip=True))
         parent_lines = anchor_context_lines(anchor)
         parent_text = " ".join(parent_lines[:10])
-        if not looks_like_job_url(url) and not looks_like_job_text(text + " " + parent_text):
+        candidate_like = (
+            looks_like_job_url(url)
+            or looks_like_job_text(text + " " + parent_text)
+            or title_has_negative_page_signal(text)
+            or url_has_negative_page_signal(url)
+            or clean_text(text).lower() in GENERIC_CAREERS_TITLES
+        )
+        if not candidate_like:
             continue
 
         title = title_from_anchor(anchor, url)
         if not title:
+            if rejected_candidates is not None:
+                raw_title = clean_text(text or title_from_slug(url))
+                rejected_candidates.append(
+                    rejection_row(
+                        {
+                            "job_title": raw_title,
+                            "job_url": url,
+                            "source_url": page_url,
+                            "rejection_reason": "missing_or_generic_title",
+                            "job_confidence_score": "-2",
+                        }
+                    )
+                )
             continue
 
         salary_min, salary_max = extract_salary_range(parent_text)
         location = extract_location(parent_lines) or extract_location_from_url(url)
-        jobs.append(
-            {
-                "job_title": title,
-                "job_url": url,
-                "location": location,
-                "remote": infer_remote_status(location, parent_text),
-                "salary_min": salary_min,
-                "salary_max": salary_max,
-                "department": extract_department(parent_lines),
-                "source_url": page_url,
-                "status": "found",
-            }
-        )
+        candidate = {
+            "job_title": title,
+            "job_url": url,
+            "location": location,
+            "remote": infer_remote_status(location, parent_text),
+            "salary_min": salary_min,
+            "salary_max": salary_max,
+            "department": extract_department(parent_lines),
+            "source_url": page_url,
+            "context_text": clean_text(f"{text} {parent_text}"),
+            "structured_data": False,
+            "status": "found",
+        }
+        if is_valid_job_posting(candidate):
+            jobs.append(accepted_job_row(candidate))
+        elif rejected_candidates is not None:
+            rejected_candidates.append(rejection_row(candidate))
 
     return jobs
 
 
-def extract_jobs_from_html(html: str, page_url: str) -> List[Dict[str, str]]:
+def extract_jobs_from_html(
+    html: str,
+    page_url: str,
+    rejected_candidates: Optional[List[Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html or "", "html.parser")
-    jobs = extract_jsonld_jobs(soup, page_url)
-    jobs.extend(extract_anchor_jobs(soup, page_url))
+    jobs = extract_jsonld_jobs(soup, page_url, rejected_candidates)
+    jobs.extend(extract_anchor_jobs(soup, page_url, rejected_candidates))
     return dedupe_jobs(jobs)
 
 
@@ -976,6 +1297,7 @@ def company_output_base(row: Dict[str, str], careers_url: str) -> Dict[str, str]
     return {
         "job_id": "",
         "snapshot_date": "",
+        "job_confidence_score": "",
         "company_id": company_id,
         "company_name": company_name,
         "company_website": website,
@@ -1184,9 +1506,6 @@ def record_discovered_page(
     discovery_method: str,
     confidence_score: int,
 ) -> None:
-    if discovery_method == "known_careers_url":
-        return
-
     normalized = normalize_url(discovered_url)
     if not normalized:
         return
@@ -1525,6 +1844,7 @@ def crawl_company(
     session: Optional[Any] = None,
     retries: int = 2,
     backoff: float = 0.5,
+    rejected_rows: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
     website = pick_company_website(row)
     known_urls = pick_existing_careers_urls(row)
@@ -1629,15 +1949,14 @@ def crawl_company(
         discovery_method = candidate.get("discovery_method", "")
         confidence_score = int(candidate.get("confidence_score", 0))
 
-        if discovery_method != "known_careers_url":
-            record_discovered_page(
-                row,
-                discovered_rows,
-                discovered_seen,
-                page_url,
-                discovery_method,
-                confidence_score,
-            )
+        record_discovered_page(
+            row,
+            discovered_rows,
+            discovered_seen,
+            page_url,
+            discovery_method,
+            confidence_score,
+        )
 
         if looks_blocked_page(fetch.html):
             log_rows.append(
@@ -1654,7 +1973,17 @@ def crawl_company(
             continue
 
         try:
-            jobs = extract_jobs_from_html(fetch.html, page_url)
+            page_rejections: List[Dict[str, str]] = []
+            jobs = extract_jobs_from_html(
+                fetch.html,
+                page_url,
+                rejected_candidates=page_rejections,
+            )
+            if rejected_rows is not None:
+                for rejected in page_rejections:
+                    rejected_with_company = dict(rejected)
+                    rejected_with_company["company_name"] = pick_company_name(row)
+                    rejected_rows.append(rejected_with_company)
         except Exception as exc:
             log_rows.append(
                 make_log_row(
@@ -1758,6 +2087,7 @@ def crawl_company(
                 "last_seen_at": today_utc(),
                 "source_url": job.get("source_url", careers_url),
                 "discovery_method": discovery_method,
+                "job_confidence_score": job.get("job_confidence_score", ""),
                 "status": "success" if discovery_method == "known_careers_url" else "success_after_fallback",
             }
         )
@@ -1792,6 +2122,13 @@ def dedupe_output_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
         seen.add(key)
         out.append(row)
     return out
+
+
+def is_output_job_row(row: Dict[str, str]) -> bool:
+    if not clean_text(row.get("job_title", "")):
+        return False
+    status = clean_text(row.get("status", ""))
+    return not status or status in {"success", "success_after_fallback"}
 
 
 def split_careers_url_display(value: str) -> List[str]:
@@ -1862,11 +2199,15 @@ def run_crawl(args: argparse.Namespace) -> None:
     log_path = Path(args.log)
     discovered_path = Path(args.discovered_pages)
     failed_path = Path(args.failed_companies)
+    rejected_path = Path(
+        getattr(args, "rejected_candidates", "output/rejected_candidates.csv")
+    )
 
     company_rows, duplicate_rows = read_company_rows_with_duplicates(input_path, limit=args.limit)
     output_rows: List[Dict[str, str]] = []
     log_rows: List[Dict[str, str]] = []
     discovered_rows: List[Dict[str, str]] = []
+    rejected_rows: List[Dict[str, str]] = []
     session = create_session()
 
     for index, row in enumerate(company_rows, start=1):
@@ -1881,6 +2222,7 @@ def run_crawl(args: argparse.Namespace) -> None:
                 session=session,
                 retries=args.retries,
                 backoff=args.backoff,
+                rejected_rows=rejected_rows,
             )
         except Exception as exc:
             jobs = [make_status_row(row, "", pick_company_website(row), "request_failed")]
@@ -1914,15 +2256,17 @@ def run_crawl(args: argparse.Namespace) -> None:
         )
 
     output_rows = dedupe_output_rows(output_rows)
+    failed_rows = summarize_failed_companies(output_rows)
+    output_rows = [row for row in output_rows if is_output_job_row(row)]
     snapshot_date = clean_text(getattr(args, "snapshot_date", "")) or today_utc()
     output_rows = add_tracking_fields(output_rows, snapshot_date)
     discovered_rows = dedupe_discovered_rows(discovered_rows or summarize_discovered_pages(output_rows))
-    failed_rows = summarize_failed_companies(output_rows)
 
     write_csv(output_path, output_rows, OUTPUT_FIELDS)
     write_csv(log_path, log_rows, LOG_FIELDS)
     write_csv(discovered_path, discovered_rows, DISCOVERED_FIELDS)
     write_csv(failed_path, failed_rows, FAILED_FIELDS)
+    write_csv(rejected_path, rejected_rows, REJECTED_FIELDS)
 
     found_count = sum(
         1 for row in output_rows if row.get("status") in {"success", "success_after_fallback"}
@@ -1931,6 +2275,7 @@ def run_crawl(args: argparse.Namespace) -> None:
     print(f"Wrote {len(log_rows)} crawl log rows to {log_path}")
     print(f"Wrote {len(discovered_rows)} discovered page rows to {discovered_path}")
     print(f"Wrote {len(failed_rows)} failed company rows to {failed_path}")
+    print(f"Wrote {len(rejected_rows)} rejected candidate rows to {rejected_path}")
     print(f"Found {found_count} job rows")
 
 
@@ -1948,6 +2293,11 @@ def parse_args() -> argparse.Namespace:
         "--failed-companies",
         default="output/failed_companies.csv",
         help="Output failed/non-success companies CSV.",
+    )
+    parser.add_argument(
+        "--rejected-candidates",
+        default="output/rejected_candidates.csv",
+        help="Output rejected job candidates CSV for QA.",
     )
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--retries", type=int, default=2, help="Request retries.")

@@ -12,6 +12,7 @@ The scraper uses only `requests` and `BeautifulSoup4` for web scraping. It does 
 - `update_snapshots.py` - helper that stores dated snapshots and analytics CSVs after a scrape.
 - `jobs_out.csv` - generated job results.
 - `crawl_log.csv` - generated request/status log.
+- `output/rejected_candidates.csv` - generated QA file for rejected possible job links/pages.
 - `data/snapshots/jobs_YYYY-MM-DD.csv` - dated historical job snapshots.
 - `data/analytics/daily_summary.csv` - daily rollup of job counts and changes.
 - `data/analytics/new_jobs.csv` - cumulative new-job comparison rows by snapshot date.
@@ -54,6 +55,7 @@ If a known careers URL fails, the crawler now tries fallback discovery before ma
 - scans the company homepage for career-like links
 - detects external ATS/job boards such as Greenhouse, Lever, Ashby, Workable, SmartRecruiters, Breezy, Recruitee, JazzHR, iCIMS, Jobvite, ADP, UKG, and BambooHR
 - limits discovery to the homepage, careers-like links, and known ATS links
+- validates each candidate with a confidence score before adding it to `jobs_out.csv`
 
 For a quick smoke test:
 
@@ -141,12 +143,16 @@ When a posting does not publish a job-specific location, the crawler falls back 
 
 `job_id` is generated from normalized `company_name`, `job_title`, and normalized `job_url`. If `job_url` is missing, it falls back to normalized `company_name`, `job_title`, and `location`. `snapshot_date` is the scraper run date used for historical comparisons.
 
-If no job listings are found for a company, the crawler writes a row with `status` such as `no_jobs_found`, `careers_page_not_found`, `js_rendered_or_unsupported`, `invalid_url`, `request_failed`, `timeout`, `non_html_response`, `parse_error`, `careers_url_failed`, or `fallback_url_failed`.
+`job_confidence_score` is generated from positive signals such as job-title keywords, job-like URL paths, application context, locations, ATS links, and JSON-LD `JobPosting` data. Generic company pages such as About, Team, Contact, Product, News, generic Careers, and Open Positions are rejected and written to `output/rejected_candidates.csv` for QA instead of `jobs_out.csv`.
+
+If no validated job listings are found for a company, the company is recorded in `output/failed_companies.csv` and `crawl_log.csv` with `status` such as `no_jobs_found`, `careers_page_not_found`, `js_rendered_or_unsupported`, `invalid_url`, `request_failed`, `timeout`, `non_html_response`, `parse_error`, `careers_url_failed`, or `fallback_url_failed`. `jobs_out.csv` is reserved for validated job postings.
 
 Standard statuses include `success`, `success_after_fallback`, `careers_url_failed`, `fallback_url_found`, `fallback_url_failed`, `ats_detected`, `no_jobs_found`, `careers_page_found`, `careers_page_not_found`, `invalid_url`, `timeout`, `request_failed`, `parse_error`, `non_html_response`, `js_rendered_or_unsupported`, `duplicate_skipped`, `redirect_detected`, `blocked`, and `unsupported_structure`.
 
 `crawl_log.csv` includes `company_name`, `attempted_url`, `attempt_type`, `status_code`, `scraper_status`, `error_message`, and `timestamp`. One failed request or company is logged and does not stop the full crawl.
 
 `output/discovered_pages.csv` includes `company_name`, `company_website`, `discovered_url`, `discovery_method`, `confidence_score`, and `timestamp`.
+
+`output/rejected_candidates.csv` includes `company_name`, `candidate_title`, `candidate_url`, `rejection_reason`, `confidence_score`, and `source_url`.
 
 JavaScript-heavy pages are not rendered with browser automation. They are marked `js_rendered_or_unsupported` and preserved in the CSV outputs for later manual/API review.
