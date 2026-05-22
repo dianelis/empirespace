@@ -13,13 +13,73 @@ const initialFilters: FiltersState = {
   city: ALL_FILTER,
   state: ALL_FILTER,
   country: ALL_FILTER,
-  remote: ALL_FILTER,
 };
 
 const unique = (values: string[]) =>
   Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
 
+const usStateCodes = new Set([
+  "AL",
+  "AK",
+  "AZ",
+  "AR",
+  "CA",
+  "CO",
+  "CT",
+  "DE",
+  "DC",
+  "FL",
+  "GA",
+  "HI",
+  "ID",
+  "IL",
+  "IN",
+  "IA",
+  "KS",
+  "KY",
+  "LA",
+  "ME",
+  "MD",
+  "MA",
+  "MI",
+  "MN",
+  "MS",
+  "MO",
+  "MT",
+  "NE",
+  "NV",
+  "NH",
+  "NJ",
+  "NM",
+  "NY",
+  "NC",
+  "ND",
+  "OH",
+  "OK",
+  "OR",
+  "PA",
+  "RI",
+  "SC",
+  "SD",
+  "TN",
+  "TX",
+  "UT",
+  "VT",
+  "VA",
+  "WA",
+  "WV",
+  "WI",
+  "WY",
+]);
+
+const normalizeUsStateCode = (value: string) => {
+  const state = value.trim().toUpperCase();
+  return usStateCodes.has(state) ? state : "";
+};
+
 const matchesFilter = (value: string, filter: string) => filter === ALL_FILTER || value === filter;
+const matchesStateFilter = (value: string, filter: string) =>
+  filter === ALL_FILTER || normalizeUsStateCode(value) === filter;
 
 function filterJobs(allJobs: Job[], filters: FiltersState) {
   const query = filters.search.trim().toLowerCase();
@@ -34,9 +94,8 @@ function filterJobs(allJobs: Job[], filters: FiltersState) {
       matchesSearch &&
       matchesFilter(job.category, filters.category) &&
       matchesFilter(job.city, filters.city) &&
-      matchesFilter(job.state, filters.state) &&
-      matchesFilter(job.country, filters.country) &&
-      matchesFilter(job.remote, filters.remote)
+      matchesStateFilter(job.state, filters.state) &&
+      matchesFilter(job.country, filters.country)
     );
   });
 }
@@ -77,9 +136,8 @@ function App() {
     () => ({
       categories: unique(jobs.map((job) => job.category)),
       cities: unique(jobs.map((job) => job.city)),
-      states: unique(jobs.map((job) => job.state)),
+      states: unique(jobs.map((job) => normalizeUsStateCode(job.state))),
       countries: unique(jobs.map((job) => job.country)),
-      remoteStatuses: unique(jobs.map((job) => job.remote)),
     }),
     [jobs],
   );

@@ -61,6 +61,13 @@ const visitWithCsv = (csv: string) => {
   };
 };
 
+const selectFilterButton = (label: string) => {
+  cy.contains("span", new RegExp(`^${label}$`, "i"))
+    .parents("label")
+    .find("button")
+    .click();
+};
+
 describe("CSV data quality handling", () => {
   it("handles an empty CSV", () => {
     const assertNoConsoleErrors = visitWithCsv(buildCsv([]));
@@ -182,6 +189,42 @@ describe("CSV data quality handling", () => {
     cy.contains("Showing 1 of 1 roles").should("be.visible");
     cy.contains("Very Long Space Company").should("be.visible");
     cy.contains("Principal Aerospace Systems").should("be.visible");
+    assertNoConsoleErrors();
+  });
+
+  it("keeps non-US state values out of the state dropdown", () => {
+    const assertNoConsoleErrors = visitWithCsv(
+      buildCsv([
+        {
+          job_id: "us-state",
+          company_name: "Empire Orbit",
+          job_title: "Aerospace Engineer",
+          job_url: "https://empire.example/jobs/aerospace-engineer",
+          location: "Buffalo, NY, United States",
+          city: "Buffalo",
+          state: "NY",
+          country: "United States",
+          last_seen_at: "2026-05-22",
+          status: "success",
+        },
+        {
+          job_id: "non-us-state",
+          company_name: "International Orbit",
+          job_title: "Propulsion Engineer",
+          job_url: "https://international.example/jobs/propulsion-engineer",
+          location: "London, England, United Kingdom",
+          city: "London",
+          state: "England",
+          country: "United Kingdom",
+          last_seen_at: "2026-05-22",
+          status: "success",
+        },
+      ]),
+    );
+
+    selectFilterButton("State");
+    cy.get("[role='option']").contains("NY").should("be.visible");
+    cy.get("[role='option']").should("not.contain", "England");
     assertNoConsoleErrors();
   });
 });

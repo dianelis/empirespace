@@ -47,13 +47,13 @@ describe("NY Space Jobs dashboard", () => {
     cy.contains("A curated view of space, aerospace, and defense jobs").should("be.visible");
     cy.contains("Total jobs").should("be.visible");
     cy.contains("Companies").should("be.visible");
-    cy.contains("Remote jobs").should("be.visible");
+    cy.get("body").should("not.contain", "Remote jobs");
     cy.contains("Latest seen").should("be.visible");
     cy.contains("Showing 3 of 3 roles").should("be.visible");
     cy.contains("th", "Company").should("be.visible");
-    cy.contains("th", "Remote").should("not.exist");
-    cy.contains("th", "Salary Min").should("not.exist");
-    cy.contains("th", "Salary Max").should("not.exist");
+    cy.get("thead").should("not.contain", "Remote");
+    cy.get("thead").should("not.contain", "Salary Min");
+    cy.get("thead").should("not.contain", "Salary Max");
     cy.contains("td", "OrbitWorks").should("be.visible");
     cy.contains("td", "Software Engineer").should("be.visible");
     assertNoBrokenImages();
@@ -70,7 +70,7 @@ describe("NY Space Jobs dashboard", () => {
     assertNoConsoleErrors();
   });
 
-  it("filters by category, city, state, country, and remote status", () => {
+  it("filters by category, city, state, and country", () => {
     const assertNoConsoleErrors = visitDashboard();
 
     selectFilter("Category", "Aerospace");
@@ -81,7 +81,6 @@ describe("NY Space Jobs dashboard", () => {
     selectFilter("City", "Brooklyn");
     selectFilter("State", "NY");
     selectFilter("Country", "United States");
-    selectFilter("Remote", "Remote");
 
     cy.contains("Showing 1 of 3 roles").should("be.visible");
     cy.contains("OrbitWorks").should("be.visible");

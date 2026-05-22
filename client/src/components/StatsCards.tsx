@@ -1,4 +1,4 @@
-import { BriefcaseBusiness, Building2, Radar, Satellite } from "lucide-react";
+import { BriefcaseBusiness, Building2, Satellite } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import type { Job } from "../types";
 
@@ -17,17 +17,15 @@ const formatLatestDate = (jobs: Job[]) => {
 
 export function StatsCards({ jobs }: StatsCardsProps) {
   const totalCompanies = new Set(jobs.map((job) => job.company).filter(Boolean)).size;
-  const remoteJobs = jobs.filter((job) => /remote/i.test(job.remote || job.location)).length;
 
   const cards = [
     { label: "Total jobs", value: jobs.length.toLocaleString(), icon: BriefcaseBusiness },
     { label: "Companies", value: totalCompanies.toLocaleString(), icon: Building2 },
-    { label: "Remote jobs", value: remoteJobs.toLocaleString(), icon: Radar },
     { label: "Latest seen", value: formatLatestDate(jobs), icon: Satellite },
   ];
 
   return (
-    <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-4 sm:grid-cols-3">
       {cards.map((card) => (
         <Card key={card.label}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">

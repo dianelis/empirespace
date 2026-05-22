@@ -34,7 +34,7 @@ export function Filters({ filters, options, onChange }: FiltersProps) {
             onChange={(event) => update("search", event.target.value)}
           />
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <Select
             label="Category"
             placeholder="All categories"
@@ -63,13 +63,6 @@ export function Filters({ filters, options, onChange }: FiltersProps) {
             onValueChange={(value) => update("country", value)}
             options={toOptions(options.countries)}
           />
-          <Select
-            label="Remote"
-            placeholder="All remote statuses"
-            value={filters.remote}
-            onValueChange={(value) => update("remote", value)}
-            options={toOptions(options.remoteStatuses)}
-          />
         </div>
         <div className="flex justify-end">
           <Button
@@ -81,7 +74,6 @@ export function Filters({ filters, options, onChange }: FiltersProps) {
                 city: ALL_FILTER,
                 state: ALL_FILTER,
                 country: ALL_FILTER,
-                remote: ALL_FILTER,
               })
             }
           >

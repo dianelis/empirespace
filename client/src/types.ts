@@ -21,7 +21,6 @@ export type FiltersState = {
   city: string;
   state: string;
   country: string;
-  remote: string;
 };
 
 export type FilterOptions = {
@@ -29,5 +28,4 @@ export type FilterOptions = {
   cities: string[];
   states: string[];
   countries: string[];
-  remoteStatuses: string[];
 };
