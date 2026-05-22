@@ -4,6 +4,8 @@ Simple command-line job scraping workflow for Empire Space company career pages.
 
 The scraper uses only `requests` and `BeautifulSoup4` for web scraping. It does not use Streamlit, Playwright, Selenium, or browser automation.
 
+Live dashboard: https://dianelis.github.io/empirespace/
+
 ## Files
 
 - `data/companies.csv` - input company data copied from the existing workspace CSV.
@@ -74,6 +76,8 @@ python discover_jobs_pages.py --input data/companies.csv --output output/compani
 ## Frontend Dashboard
 
 The `client/` app is a static React + Vite dashboard for reviewing NY Space Jobs from a committed CSV snapshot.
+
+Live site: https://dianelis.github.io/empirespace/
 
 To refresh the dashboard data after a crawl:
 
