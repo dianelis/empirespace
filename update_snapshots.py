@@ -136,6 +136,9 @@ def normalize_snapshot_rows(
             )
             row.update(location_fields)
             row["remote"] = clean_text(row.get("remote", "")) or infer_remote_status(row.get("location", ""))
+            row["last_seen_at"] = snapshot_date
+            if not clean_text(row.get("date_found", "")):
+                row["date_found"] = snapshot_date
             validated.append(row)
     normalized = validated
     add_tracking_fields(normalized, snapshot_date)

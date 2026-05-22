@@ -51,6 +51,9 @@ describe("NY Space Jobs dashboard", () => {
     cy.contains("Latest seen").should("be.visible");
     cy.contains("Showing 3 of 3 roles").should("be.visible");
     cy.contains("th", "Company").should("be.visible");
+    cy.contains("th", "Remote").should("not.exist");
+    cy.contains("th", "Salary Min").should("not.exist");
+    cy.contains("th", "Salary Max").should("not.exist");
     cy.contains("td", "OrbitWorks").should("be.visible");
     cy.contains("td", "Software Engineer").should("be.visible");
     assertNoBrokenImages();

@@ -316,7 +316,7 @@ const normalizeRow = (row: RawRow, index: number): Job | null => {
     remote: inferRemote(row, location),
     salaryMin: formatSalary(value(row, ["salary_min", "salaryMin"])),
     salaryMax: formatSalary(value(row, ["salary_max", "salaryMax"])),
-    lastSeenAt: value(row, ["last_seen_at", "date_found", "found_at"]),
+    lastSeenAt: value(row, ["snapshot_date", "last_seen_at", "date_found", "found_at"]),
     applyUrl,
     status,
   };

@@ -70,7 +70,7 @@ describe("CSV data quality handling", () => {
     assertNoConsoleErrors();
   });
 
-  it("handles missing company, location, and salary fields", () => {
+  it("handles missing company, location, and removed salary fields", () => {
     const assertNoConsoleErrors = visitWithCsv(
       buildCsv([
         {
@@ -93,7 +93,8 @@ describe("CSV data quality handling", () => {
     cy.contains("Showing 1 of 1 roles").should("be.visible");
     cy.contains("Systems Engineer").should("be.visible");
     cy.contains("Skipped Title Co").should("not.exist");
-    cy.contains("Not listed").should("exist");
+    cy.contains("th", "Salary Min").should("not.exist");
+    cy.contains("th", "Salary Max").should("not.exist");
     assertNoConsoleErrors();
   });
 

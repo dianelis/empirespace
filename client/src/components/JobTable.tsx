@@ -33,9 +33,6 @@ export function JobTable({ jobs }: JobTableProps) {
               <TableHead>City</TableHead>
               <TableHead>State</TableHead>
               <TableHead>Country</TableHead>
-              <TableHead>Remote</TableHead>
-              <TableHead>Salary Min</TableHead>
-              <TableHead>Salary Max</TableHead>
               <TableHead>Last Seen</TableHead>
               <TableHead>Apply</TableHead>
             </TableRow>
@@ -52,9 +49,6 @@ export function JobTable({ jobs }: JobTableProps) {
                 <TableCell>{display(job.city)}</TableCell>
                 <TableCell>{display(job.state)}</TableCell>
                 <TableCell>{display(job.country)}</TableCell>
-                <TableCell>{display(job.remote)}</TableCell>
-                <TableCell>{display(job.salaryMin, "Not listed")}</TableCell>
-                <TableCell>{display(job.salaryMax, "Not listed")}</TableCell>
                 <TableCell className="min-w-28">{display(job.lastSeenAt)}</TableCell>
                 <TableCell>
                   {job.applyUrl ? (
