@@ -31,6 +31,8 @@ from discover_jobs_pages import (
 
 
 OUTPUT_FIELDS = [
+    "job_id",
+    "snapshot_date",
     "company_id",
     "company_name",
     "company_website",
@@ -374,6 +376,12 @@ def stable_id(value: str) -> str:
 
 def is_blank(value: str) -> bool:
     return clean_text(value).lower() in {"", "null", "nullz", "none", "nan", "n/a"}
+
+
+def normalize_identity_part(value: str) -> str:
+    value = clean_text(value).lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return clean_text(value)
 
 
 def canonicalize_url(url: str) -> str:
@@ -966,12 +974,41 @@ def company_output_base(row: Dict[str, str], careers_url: str) -> Dict[str, str]
         (company_name + "|" + website).lower()
     )
     return {
+        "job_id": "",
+        "snapshot_date": "",
         "company_id": company_id,
         "company_name": company_name,
         "company_website": website,
         "careers_url": careers_url,
         "category": clean_text(row.get("category", "")),
     }
+
+
+def generate_job_id(row: Dict[str, str]) -> str:
+    company_name = normalize_identity_part(row.get("company_name", ""))
+    job_title = normalize_identity_part(row.get("job_title", ""))
+    if not company_name or not job_title:
+        return ""
+
+    job_url = canonicalize_url(row.get("job_url", ""))
+    if job_url:
+        key = "|".join([company_name, job_title, job_url])
+    else:
+        key = "|".join(
+            [
+                company_name,
+                job_title,
+                normalize_identity_part(row.get("location", "")),
+            ]
+        )
+    return stable_id(key)
+
+
+def add_tracking_fields(rows: List[Dict[str, str]], snapshot_date: str) -> List[Dict[str, str]]:
+    for row in rows:
+        row["snapshot_date"] = snapshot_date
+        row["job_id"] = row.get("job_id") or generate_job_id(row)
+    return rows
 
 
 def make_status_row(
@@ -1877,6 +1914,8 @@ def run_crawl(args: argparse.Namespace) -> None:
         )
 
     output_rows = dedupe_output_rows(output_rows)
+    snapshot_date = clean_text(getattr(args, "snapshot_date", "")) or today_utc()
+    output_rows = add_tracking_fields(output_rows, snapshot_date)
     discovered_rows = dedupe_discovered_rows(discovered_rows or summarize_discovered_pages(output_rows))
     failed_rows = summarize_failed_companies(output_rows)
 
@@ -1919,6 +1958,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=12,
         help="Career/listing pages to fetch per company.",
+    )
+    parser.add_argument(
+        "--snapshot-date",
+        default="",
+        help="Snapshot date to write into jobs_out.csv. Defaults to the current UTC date.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit companies for testing.")
     return parser.parse_args()
