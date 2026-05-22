@@ -249,10 +249,44 @@ const formatSalary = (rawValue: string) => {
   }).format(amount);
 };
 
+const normalizeApplyUrl = (rawValue: string) => {
+  const value = rawValue.trim();
+  if (!value) return "";
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    return "";
+  }
+};
+
+const jobDedupeKey = (job: Job) =>
+  job.applyUrl ||
+  [
+    job.company.trim().toLowerCase(),
+    job.title.trim().toLowerCase(),
+    job.location.trim().toLowerCase(),
+  ].join("|");
+
+const dedupeJobs = (jobs: Job[]) => {
+  const seen = new Set<string>();
+  const deduped: Job[] = [];
+
+  for (const job of jobs) {
+    const key = jobDedupeKey(job);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(job);
+  }
+
+  return deduped;
+};
+
 const normalizeRow = (row: RawRow, index: number): Job | null => {
   const company = value(row, ["company_name", "organization_name", "company"]);
   const title = value(row, ["job_title", "title"]);
-  const applyUrl = value(row, ["job_url", "apply_url", "canonical_job_url", "source_job_url"]);
+  const applyUrl = normalizeApplyUrl(value(row, ["job_url", "apply_url", "canonical_job_url", "source_job_url"]));
   const rawLocation = value(row, ["location", "location_text"]);
   const parsedLocation = locationParts(rawLocation);
   const structuredLocation = locationParts(
@@ -289,12 +323,14 @@ const normalizeRow = (row: RawRow, index: number): Job | null => {
 };
 
 export const parseJobsCsv = (csv: string): Job[] =>
-  Papa.parse<RawRow>(csv, {
-    header: true,
-    skipEmptyLines: true,
-  })
-    .data.map(normalizeRow)
-    .filter((job): job is Job => Boolean(job));
+  dedupeJobs(
+    Papa.parse<RawRow>(csv, {
+      header: true,
+      skipEmptyLines: true,
+    })
+      .data.map(normalizeRow)
+      .filter((job): job is Job => Boolean(job)),
+  );
 
 export const loadJobs = async (): Promise<Job[]> => {
   const response = await fetch(`${import.meta.env.BASE_URL}data/jobs_out.csv`, {

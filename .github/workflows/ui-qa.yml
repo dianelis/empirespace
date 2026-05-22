@@ -1,0 +1,170 @@
+name: UI QA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  cypress:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: client
+        run: npm run build
+
+      - name: Run Cypress UI QA
+        id: cypress
+        uses: cypress-io/github-action@v6
+        continue-on-error: true
+        with:
+          working-directory: client
+          install: false
+          start: npm run preview
+          wait-on: http://localhost:4173
+          command: npm run cy:run:logged
+
+      - name: Upload Cypress artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-ui-qa-${{ github.run_id }}
+          path: |
+            client/cypress/screenshots
+            client/cypress/videos
+            client/cypress-results.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Create UI QA failure issue
+        if: steps.cypress.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const artifactUrl = `${runUrl}#artifacts`;
+            const logPath = path.join(process.env.GITHUB_WORKSPACE, "client", "cypress-results.log");
+            const screenshotsDir = path.join(process.env.GITHUB_WORKSPACE, "client", "cypress", "screenshots");
+            const videosDir = path.join(process.env.GITHUB_WORKSPACE, "client", "cypress", "videos");
+
+            const readLog = () => {
+              if (!fs.existsSync(logPath)) return "No Cypress log file was found.";
+              return fs.readFileSync(logPath, "utf8");
+            };
+
+            const walk = (dir) => {
+              if (!fs.existsSync(dir)) return [];
+              return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+                const fullPath = path.join(dir, entry.name);
+                return entry.isDirectory() ? walk(fullPath) : [fullPath];
+              });
+            };
+
+            const log = readLog();
+            const failureMatches = [...log.matchAll(/^\s+\d+\)\s+(.+)$/gm)].map((match) => match[1].trim());
+            const screenshotFailures = walk(screenshotsDir)
+              .filter((file) => file.endsWith(".png") && file.includes("(failed)"))
+              .map((file) => path.basename(file).replace(/\s+\(failed\)\.png$/, "").replace(/ -- /g, " > "));
+            const failedTests = [...new Set([...failureMatches, ...screenshotFailures])];
+            const errorSummary = log
+              .split(/\r?\n/)
+              .filter((line) => /CypressError|AssertionError|Error:|failing|failed/i.test(line))
+              .slice(-30)
+              .join("\n")
+              .trim();
+            const screenshots = walk(screenshotsDir).map((file) => path.relative(process.env.GITHUB_WORKSPACE, file));
+            const videos = walk(videosDir).map((file) => path.relative(process.env.GITHUB_WORKSPACE, file));
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: "ui-qa-failure" });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: "ui-qa-failure",
+                  color: "d73a4a",
+                  description: "Cypress UI QA test failures",
+                });
+              } else {
+                throw error;
+              }
+            }
+
+            const body = `## UI QA Failure
+
+            The Cypress UI QA workflow failed.
+
+            - Workflow run: ${runUrl}
+            - Screenshots/videos artifact: ${artifactUrl}
+            - Commit: ${context.sha}
+            - Event: ${context.eventName}
+
+            ## Failed Test Names
+
+            ${failedTests.length ? failedTests.map((name) => `- ${name}`).join("\n") : "- Failed test names were not available. Review the workflow log and artifacts."}
+
+            ## Error Summary
+
+            \`\`\`text
+            ${errorSummary || "No concise error summary was detected. Review the Cypress log artifact and workflow output."}
+            \`\`\`
+
+            ## Artifact Contents
+
+            Screenshots:
+            ${screenshots.length ? screenshots.map((file) => `- ${file}`).join("\n") : "- No screenshots found."}
+
+            Videos:
+            ${videos.length ? videos.map((file) => `- ${file}`).join("\n") : "- No videos found."}
+
+            ## Suggested Debugging Checklist
+
+            - Open the workflow run and download the Cypress artifact.
+            - Review failed screenshots and videos first.
+            - Check \`client/cypress-results.log\` for assertion failures or console errors.
+            - Run \`cd client && npm run test:e2e\` locally.
+            - Confirm CSV parsing still handles missing, malformed, duplicate, and long-field rows.
+            - Confirm the static GitHub Pages build still loads \`/data/jobs_out.csv\`.
+
+            ## Agent Fix Prompt
+
+            Investigate the failing Cypress UI QA tests for the React dashboard. Review the failed test names, screenshots, videos, and console errors. Fix the UI, data parsing, or test fixture issue causing the failure. Preserve the existing design direction: black background, space theme, shadcn/ui components, GitHub Pages compatibility, and CSV-based static data loading. Run npm run build and npm run test:e2e before submitting changes.
+            `;
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `UI QA failure - run ${process.env.GITHUB_RUN_NUMBER}`,
+              labels: ["ui-qa-failure"],
+              body,
+            });
+
+      - name: Fail workflow if Cypress failed
+        if: steps.cypress.outcome == 'failure'
+        run: exit 1

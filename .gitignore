@@ -12,4 +12,10 @@ client/dist/
 client/*.tsbuildinfo
 client/vite.config.js
 client/vite.config.d.ts
+!client/cypress/fixtures/jobs_out.csv
+client/cypress/screenshots/
+client/cypress/videos/
+client/cypress/downloads/
+client/cypress/results/
+client/cypress-results.log
 !client/public/data/jobs_out.csv
