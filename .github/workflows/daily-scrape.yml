@@ -23,15 +23,25 @@ jobs:
       snapshot_date: ${{ steps.check.outputs.snapshot_date }}
 
     steps:
-      - name: Check New York run time
+      - name: Check New York schedule
         id: check
         run: |
           snapshot_date="$(TZ=America/New_York date +%F)"
-          current_hour="$(TZ=America/New_York date +%H)"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$current_hour" = "06" ]; then
+          ny_offset="$(TZ=America/New_York date +%z)"
+          scheduled_cron="${{ github.event.schedule }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run requested."
+          elif [ "$scheduled_cron" = "0 10 * * *" ] && [ "$ny_offset" = "-0400" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Running the 6 AM EDT schedule."
+          elif [ "$scheduled_cron" = "0 11 * * *" ] && [ "$ny_offset" = "-0500" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Running the 6 AM EST schedule."
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping duplicate daylight-saving schedule. cron=${scheduled_cron} ny_offset=${ny_offset}"
           fi
           echo "snapshot_date=${snapshot_date}" >> "$GITHUB_OUTPUT"
 

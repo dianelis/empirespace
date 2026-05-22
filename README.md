@@ -101,7 +101,7 @@ The dashboard reads `client/public/data/jobs_out.csv`, shows stats, client-side 
 
 ## Daily Refresh
 
-GitHub Actions runs `.github/workflows/daily-scrape.yml` once per day at 6:00 AM New York time and can also be started manually from the Actions tab. The workflow schedules both `0 10 * * *` and `0 11 * * *` UTC, then uses `America/New_York` time inside the job so daylight saving time still lands on the 6:00 AM run.
+GitHub Actions runs `.github/workflows/daily-scrape.yml` once per day at 6:00 AM New York time and can also be started manually from the Actions tab. The workflow schedules both `0 10 * * *` and `0 11 * * *` UTC, then checks which cron expression fired against the current `America/New_York` UTC offset. This avoids skipped scrapes when GitHub starts a scheduled run late, while still preventing the duplicate EST/EDT schedule from scraping twice.
 
 The workflow installs Python dependencies, runs the scraper, writes `client/public/data/jobs_out.csv`, stores `data/snapshots/jobs_YYYY-MM-DD.csv`, updates `data/analytics/*.csv`, commits changed data back to `main` with `Daily jobs snapshot update`, builds the Vite app, and deploys GitHub Pages.
 
