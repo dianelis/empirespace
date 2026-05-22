@@ -89,7 +89,8 @@ jobs:
             --snapshot-date "$SNAPSHOT_DATE" \
             --client-output client/public/data/jobs_out.csv \
             --snapshots-dir data/snapshots \
-            --analytics-dir data/analytics
+            --analytics-dir data/analytics \
+            --companies data/companies.csv
 
       - name: Upload scrape logs
         if: always()

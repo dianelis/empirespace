@@ -1,12 +1,17 @@
 from pathlib import Path
 
 from crawl_jobs import (
+    KNOWN_COUNTRIES,
     OUTPUT_FIELDS,
+    STATE_CODES,
     dedupe_jobs,
     extract_jobs_from_html,
     extract_salary_range,
+    is_known_country,
     parse_location_fields,
+    normalize_state,
     write_csv,
+    sanitize_job_title,
 )
 
 
@@ -170,6 +175,35 @@ def test_jsonld_jobposting_and_apply_card_are_valid():
     assert "Electrical Technician" in titles
 
 
+def test_prose_text_is_rejected_as_location_and_falls_back_to_company_city():
+    fields = parse_location_fields(
+        "Build skills in STEM, leadership, and teamwork before high school graduation.",
+        {"location": "Owego"},
+    )
+    assert fields == {
+        "location": "Owego, NY, United States",
+        "city": "Owego",
+        "state": "NY",
+        "country": "United States",
+    }
+
+
+def test_category_fragments_are_rejected_as_locations():
+    fields = parse_location_fields("Quality, &, Operational, Excellen|New, Grads", {"location": "Greece"})
+    assert fields["location"] == "Greece, NY, United States"
+    assert fields["city"] == "Greece"
+    assert fields["state"] == "NY"
+    assert fields["country"] == "United States"
+
+
+def test_multi_city_location_uses_first_valid_city_state_pair():
+    fields = parse_location_fields("Greenville, Texas, Plano, Texas, Rockwall, Texas")
+    assert fields["location"] == "Greenville, Texas, Plano, Texas, Rockwall, Texas"
+    assert fields["city"] == "Greenville"
+    assert fields["state"] == "TX"
+    assert fields["country"] == "United States"
+
+
 def test_location_fields_are_parsed_from_job_location():
     fields = parse_location_fields("Endicott, New York, United States")
     assert fields["city"] == "Endicott"
@@ -185,6 +219,41 @@ def test_company_location_falls_back_to_new_york():
     assert fields["country"] == "United States"
 
 
+def test_broad_opportunity_pages_are_rejected_as_jobs():
+    html = """
+    <article class="job-card">
+      <a href="/careers/candidates/students-early-careers/high-school.html">
+        High School Internship Opportunities
+      </a>
+      <p>Build skills in STEM, leadership, and teamwork before high school graduation.</p>
+      <p>Apply now</p>
+    </article>
+    """
+    rejected = []
+    jobs = extract_jobs_from_html(html, "https://example.com/careers", rejected_candidates=rejected)
+
+    assert jobs == []
+    assert rejected
+    assert rejected[0]["rejection_reason"] == "broad_opportunity_page"
+
+
+def test_polluted_titles_fall_back_to_job_url_slug():
+    assert (
+        sanitize_job_title(
+            "Spec, Configuration Management 1 Engineering, Services Greenville, TX",
+            "https://careers.example.com/job/greenville/spec-configuration-management-1/12345",
+        )
+        == "Spec Configuration Management"
+    )
+    assert (
+        sanitize_job_title(
+            "Senior Associate, Quality Engineering Quality, &, Operational, Excellen|New, Grads Cincinnati, OH",
+            "https://careers.example.com/job/cincinnati/senior-associate-quality-engineering/12345",
+        )
+        == "Senior Associate Quality Engineering"
+    )
+
+
 def test_salary_range_extraction():
     assert extract_salary_range("Salary range: $80,000 - $120,000") == ("80000", "120000")
     assert extract_salary_range("Compensation: $90k to $110k") == ("90000", "110000")
@@ -195,3 +264,28 @@ def test_csv_output_headers(tmp_path):
     output = tmp_path / "jobs_out.csv"
     write_csv(output, [], OUTPUT_FIELDS)
     assert output.read_text(encoding="utf-8").splitlines()[0] == ",".join(OUTPUT_FIELDS)
+
+
+def test_committed_frontend_csv_has_clean_dropdown_fields():
+    import csv
+
+    rows = list(csv.DictReader(Path("client/public/data/jobs_out.csv").open(encoding="utf-8")))
+    for row in rows:
+        for field in ("city", "state", "country"):
+            value = row.get(field, "")
+            assert "teamwork" not in value.lower()
+            assert "graduation" not in value.lower()
+            assert "configuration management" not in value.lower()
+            assert value != "&"
+        title = row.get("job_title", "").lower()
+        assert "internship program" not in title
+        assert "early talent" not in title
+        assert "student programs" not in title
+        country = row.get("country", "")
+        state = row.get("state", "")
+        if country:
+            assert is_known_country(country), f"Unexpected country {country!r}"
+        if state and country == "United States":
+            assert normalize_state(state) in STATE_CODES
+        if country and country != "United States":
+            assert country in KNOWN_COUNTRIES

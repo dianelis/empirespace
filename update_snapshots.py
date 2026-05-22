@@ -5,14 +5,16 @@ import csv
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 from crawl_jobs import (
     OUTPUT_FIELDS,
     add_tracking_fields,
     canonicalize_url,
     clean_text,
+    infer_remote_status,
     is_valid_job_posting,
+    parse_location_fields,
 )
 
 
@@ -79,6 +81,28 @@ def write_csv(path: Path, rows: List[Dict[str, str]], fieldnames: Sequence[str])
         writer.writerows(rows)
 
 
+def build_company_location_map(companies_path: Optional[Path]) -> Dict[str, str]:
+    if not companies_path or not companies_path.exists():
+        return {}
+
+    locations: Dict[str, str] = {}
+    for row in read_csv(companies_path):
+        location = clean_text(row.get("location", ""))
+        if not location:
+            continue
+        for key in (clean_text(row.get("company_id", "")), clean_text(row.get("company_name", "")).lower()):
+            if key and key not in locations:
+                locations[key] = location
+    return locations
+
+
+def company_fallback_row(row: Dict[str, str], company_locations: Dict[str, str]) -> Dict[str, str]:
+    company_id = clean_text(row.get("company_id", ""))
+    company_name = clean_text(row.get("company_name", "")).lower()
+    location = company_locations.get(company_id) or company_locations.get(company_name) or ""
+    return {"location": location} if location else row
+
+
 def is_job_row(row: Dict[str, str]) -> bool:
     if not clean_text(row.get("job_title", "")):
         return False
@@ -86,7 +110,12 @@ def is_job_row(row: Dict[str, str]) -> bool:
     return not status or status in SUCCESS_STATUSES
 
 
-def normalize_snapshot_rows(rows: List[Dict[str, str]], snapshot_date: str) -> List[Dict[str, str]]:
+def normalize_snapshot_rows(
+    rows: List[Dict[str, str]],
+    snapshot_date: str,
+    company_locations: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, str]]:
+    company_locations = company_locations or {}
     normalized = []
     for row in rows:
         normalized.append({field: row.get(field, "") for field in OUTPUT_FIELDS})
@@ -98,8 +127,15 @@ def normalize_snapshot_rows(rows: List[Dict[str, str]], snapshot_date: str) -> L
         candidate = dict(row)
         candidate.setdefault("context_text", "")
         if is_valid_job_posting(candidate):
+            row["job_title"] = candidate.get("job_title", row.get("job_title", ""))
             row["job_url"] = candidate.get("job_url", row.get("job_url", ""))
             row["job_confidence_score"] = candidate.get("job_confidence_score", "")
+            location_fields = parse_location_fields(
+                row.get("location", ""),
+                company_fallback_row(row, company_locations),
+            )
+            row.update(location_fields)
+            row["remote"] = clean_text(row.get("remote", "")) or infer_remote_status(row.get("location", ""))
             validated.append(row)
     normalized = validated
     add_tracking_fields(normalized, snapshot_date)
@@ -246,8 +282,10 @@ def update_snapshot_storage(
     client_output: Path,
     snapshots_dir: Path,
     analytics_dir: Path,
+    companies_path: Optional[Path] = None,
 ) -> None:
-    current_rows = normalize_snapshot_rows(read_csv(jobs_path), snapshot_date)
+    company_locations = build_company_location_map(companies_path)
+    current_rows = normalize_snapshot_rows(read_csv(jobs_path), snapshot_date, company_locations)
     previous_path = latest_previous_snapshot(snapshots_dir, snapshot_date)
     previous_rows = read_csv(previous_path) if previous_path else []
 
@@ -342,6 +380,11 @@ def parse_args() -> argparse.Namespace:
         default="data/analytics",
         help="Directory for analytics CSV outputs.",
     )
+    parser.add_argument(
+        "--companies",
+        default="data/companies.csv",
+        help="Company CSV used for location fallbacks.",
+    )
     return parser.parse_args()
 
 
@@ -353,6 +396,7 @@ def main() -> None:
         client_output=Path(args.client_output),
         snapshots_dir=Path(args.snapshots_dir),
         analytics_dir=Path(args.analytics_dir),
+        companies_path=Path(args.companies),
     )
 
 

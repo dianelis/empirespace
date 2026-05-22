@@ -20,10 +20,10 @@ export function Select({ value, onValueChange, options, placeholder, label }: Se
     <label className="grid gap-2 text-sm">
       <span className="text-xs font-medium uppercase tracking-normal text-muted-foreground">{label}</span>
       <SelectPrimitive.Root value={value} onValueChange={onValueChange}>
-        <SelectPrimitive.Trigger className="inline-flex h-11 w-full items-center justify-between rounded-lg border border-input bg-black/35 px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/25">
-          <SelectPrimitive.Value placeholder={placeholder} />
+        <SelectPrimitive.Trigger className="inline-flex h-11 w-full min-w-0 items-center justify-between gap-2 rounded-lg border border-input bg-black/35 px-3 text-left text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/25">
+          <SelectPrimitive.Value className="truncate" placeholder={placeholder} />
           <SelectPrimitive.Icon>
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
           </SelectPrimitive.Icon>
         </SelectPrimitive.Trigger>
         <SelectPrimitive.Portal>

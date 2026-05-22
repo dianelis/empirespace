@@ -113,7 +113,7 @@ JOB_TITLE_WORD_RE = re.compile(
     r"\b("
     r"engineer|engineering|developer|designer|manager|director|analyst|scientist|"
     r"technician|operator|specialist|associate|coordinator|administrator|architect|"
-    r"assistant|consultant|lead|leader|intern|internship|recruiter|sales|operations|"
+    r"assistant|consultant|lead|leader|intern|internship|management|recruiter|sales|operations|"
     r"product|software|mechanical|electrical|aerospace|propulsion|avionics"
     r")s?\b",
     re.I,
@@ -160,6 +160,15 @@ GENERIC_CAREERS_TITLES = GENERIC_TITLES | {
     "explore careers",
 }
 
+BROAD_OPPORTUNITY_TITLE_RE = re.compile(
+    r"\b("
+    r"high school|student|students|student programs?|early careers?|early talent|"
+    r"new grads?|graduates?|campus|internship opportunities|internship program|"
+    r"internships|apprenticeships|explore internship|opportunities"
+    r")\b",
+    re.I,
+)
+
 APPLICATION_SIGNAL_RE = re.compile(
     r"\b("
     r"apply|apply now|submit application|job description|responsibilities|qualifications|"
@@ -180,7 +189,7 @@ JOB_PATH_RE = re.compile(
 )
 
 JOB_DETAIL_ID_RE = re.compile(
-    r"/(?:jobs?|positions?|openings?|roles?)/\d{3,}(?:[-/]|$)",
+    r"/(?:jobs?|careers?|positions?|openings?|roles?)/(?:[^/]+/){0,4}\d{3,}(?:[-/]|$)",
     re.I,
 )
 
@@ -433,8 +442,52 @@ COUNTRY_ALIASES = {
     "us": "United States",
     "u.s.": "United States",
     "u.s.a.": "United States",
+    "united states": "United States",
     "united states of america": "United States",
+    "uk": "United Kingdom",
+    "u.k.": "United Kingdom",
+    "uae": "United Arab Emirates",
+    "u.a.e.": "United Arab Emirates",
 }
+
+KNOWN_COUNTRIES = {
+    "Australia",
+    "Austria",
+    "Belgium",
+    "Brazil",
+    "Canada",
+    "China",
+    "Denmark",
+    "Finland",
+    "France",
+    "Germany",
+    "India",
+    "Ireland",
+    "Israel",
+    "Italy",
+    "Japan",
+    "Mexico",
+    "Netherlands",
+    "Norway",
+    "Poland",
+    "Singapore",
+    "South Korea",
+    "Spain",
+    "Sweden",
+    "Switzerland",
+    "United Arab Emirates",
+    "United Kingdom",
+    "United States",
+}
+
+LOCATION_PROSE_RE = re.compile(
+    r"\b("
+    r"build skills|teamwork|graduation|responsibilities|requirements|qualifications|"
+    r"benefits|compensation|salary|department|category|function|operational|"
+    r"excellence|learn more|apply now|view details"
+    r")\b",
+    re.I,
+)
 
 REMOTE_HINT_RE = re.compile(r"\b(remote|telecommute|work from home)\b", re.I)
 HYBRID_HINT_RE = re.compile(r"\bhybrid\b", re.I)
@@ -638,7 +691,16 @@ def extract_salary_range(text: str) -> Tuple[str, str]:
 
 def normalize_country(value: str) -> str:
     value = clean_text(value)
-    return COUNTRY_ALIASES.get(value.lower(), value)
+    normalized = COUNTRY_ALIASES.get(value.lower(), value)
+    for country in KNOWN_COUNTRIES:
+        if normalized.lower() == country.lower():
+            return country
+    return normalized
+
+
+def is_known_country(value: str) -> bool:
+    normalized = normalize_country(value)
+    return normalized in KNOWN_COUNTRIES
 
 
 def normalize_state(value: str) -> str:
@@ -660,9 +722,120 @@ def strip_location_label(value: str) -> str:
 
 def fallback_company_location(row: Dict[str, str]) -> str:
     city = clean_text(row.get("location", ""))
-    if not city:
+    if not city or not looks_like_place_name(city):
         return ""
     return f"{city}, NY, United States"
+
+
+def is_remote_location(value: str) -> bool:
+    value = clean_text(value)
+    return bool(
+        re.fullmatch(
+            r"(remote|hybrid|on-site|onsite|remote\s*-\s*(?:us|u\.s\.|united states))",
+            value,
+            re.I,
+        )
+    )
+
+
+def looks_like_place_name(value: str) -> bool:
+    value = strip_location_label(value)
+    if not value or len(value) > 60:
+        return False
+    if LOCATION_PROSE_RE.search(value):
+        return False
+    if contains_job_title_word(value):
+        return False
+    if re.search(r"[|&]", value):
+        return False
+    if re.search(r"\d", value):
+        return False
+    if value.count(".") > 1 or (value.endswith(".") and len(value.split()) > 3):
+        return False
+    if len(value.split()) > 6:
+        return False
+    return bool(re.search(r"[A-Za-z]", value))
+
+
+def is_state_value(value: str) -> bool:
+    return normalize_state(value) in STATE_CODES
+
+
+def blank_location_fields(location: str = "") -> Dict[str, str]:
+    return {"location": location, "city": "", "state": "", "country": ""}
+
+
+def parse_valid_location_fields(location: str) -> Dict[str, str]:
+    location = strip_location_label(location)
+    if not location:
+        return blank_location_fields()
+    if is_remote_location(location):
+        return blank_location_fields(location)
+    if len(location) > 160 or LOCATION_PROSE_RE.search(location):
+        return blank_location_fields()
+
+    first_location = re.split(r"\s*(?:;|\|)\s*", location, maxsplit=1)[0]
+    first_location = strip_location_label(first_location)
+    parts = [strip_location_label(part) for part in first_location.split(",")]
+    parts = [part for part in parts if part]
+    if not parts:
+        return blank_location_fields()
+    if any(not looks_like_place_name(part) and not is_state_value(part) and not is_known_country(part) for part in parts):
+        return blank_location_fields()
+
+    city = ""
+    state = ""
+    country = ""
+
+    if len(parts) >= 4 and is_state_value(parts[1]) and is_state_value(parts[3]):
+        city = parts[0]
+        state = normalize_state(parts[1])
+        country = "United States"
+    elif len(parts) >= 3 and is_known_country(parts[2]):
+        city = parts[0]
+        country = normalize_country(parts[2])
+        if is_state_value(parts[1]):
+            state = normalize_state(parts[1])
+        elif country != "United States" and looks_like_place_name(parts[1]):
+            state = parts[1]
+        else:
+            return blank_location_fields()
+    elif len(parts) >= 3 and is_state_value(parts[-1]):
+        city = parts[0]
+        state = normalize_state(parts[-1])
+        country = "United States"
+    elif len(parts) >= 2 and is_state_value(parts[1]):
+        city = parts[0]
+        state = normalize_state(parts[1])
+        country = "United States"
+    elif len(parts) >= 2 and is_known_country(parts[1]):
+        city = parts[0]
+        country = normalize_country(parts[1])
+    elif is_known_country(parts[0]):
+        country = normalize_country(parts[0])
+    elif len(parts) == 1 and is_known_country(parts[0]):
+        country = normalize_country(parts[0])
+    else:
+        return blank_location_fields()
+
+    if city and not looks_like_place_name(city):
+        return blank_location_fields()
+    if country == "United States" and state and state not in STATE_CODES:
+        return blank_location_fields()
+    if country and not is_known_country(country):
+        return blank_location_fields()
+
+    return {
+        "location": location,
+        "city": city,
+        "state": state,
+        "country": country,
+    }
+
+
+def is_valid_location_text(location: str) -> bool:
+    fields = parse_valid_location_fields(location)
+    return bool(fields["location"] and (is_remote_location(fields["location"]) or fields["city"] or fields["country"]))
 
 
 def infer_remote_status(location: str, text: str = "") -> str:
@@ -678,51 +851,18 @@ def infer_remote_status(location: str, text: str = "") -> str:
 
 def parse_location_fields(location: str, row: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     location = strip_location_label(location)
-    if not location and row:
-        location = fallback_company_location(row)
+    fields = parse_valid_location_fields(location)
+    if fields["location"]:
+        return fields
 
-    if not location:
-        return {"location": "", "city": "", "state": "", "country": ""}
+    if row:
+        fallback = fallback_company_location(row)
+        if fallback and fallback.lower() != location.lower():
+            fallback_fields = parse_valid_location_fields(fallback)
+            if fallback_fields["location"]:
+                return fallback_fields
 
-    if REMOTE_HINT_RE.fullmatch(location):
-        return {"location": location, "city": "", "state": "", "country": ""}
-
-    first_location = re.split(r"\s*(?:;|\||/)\s*", location, maxsplit=1)[0]
-    parts = [strip_location_label(part) for part in first_location.split(",")]
-    parts = [part for part in parts if part]
-
-    city = ""
-    state = ""
-    country = ""
-
-    if len(parts) >= 3:
-        city = parts[0]
-        state = normalize_state(parts[1])
-        country = normalize_country(parts[2])
-    elif len(parts) == 2:
-        city = parts[0]
-        second = normalize_country(parts[1])
-        if second.lower() in {"united states", "united kingdom", "canada"}:
-            country = second
-        else:
-            state = normalize_state(parts[1])
-            country = "United States" if state in STATE_CODES else ""
-    elif len(parts) == 1:
-        single = normalize_country(parts[0])
-        if single.lower() in {"remote", "united states", "united kingdom", "canada"}:
-            country = "" if single.lower() == "remote" else single
-        else:
-            city = parts[0]
-            if row and clean_text(row.get("location", "")).lower() == city.lower():
-                state = "NY"
-                country = "United States"
-
-    return {
-        "location": location,
-        "city": city,
-        "state": state,
-        "country": country,
-    }
+    return blank_location_fields()
 
 
 def extract_jsonld_jobs(
@@ -798,7 +938,10 @@ def clean_job_title(title: str) -> str:
     title = clean_text(title)
     title = re.sub(r"^(apply for|apply to|view|read more about)\s+", "", title, flags=re.I)
     title = re.split(r"\b(?:location|department|team|category|function)\s*[:\-]", title, maxsplit=1, flags=re.I)[0]
-    title = re.sub(r"\s+\|\s+.*$", "", title)
+    if "|" in title or re.search(r",\s*&\s*,", title):
+        return ""
+    if len([part for part in title.split(",") if part.strip()]) >= 3 and re.search(r",\s*[A-Z]{2}$", title):
+        return ""
     title = re.sub(r"\s+-\s+careers?$", "", title, flags=re.I)
     title = title.strip(" -|:")
 
@@ -817,18 +960,27 @@ def title_from_slug(url: str) -> str:
     except ValueError:
         return ""
 
-    slug = path.rstrip("/").split("/")[-1]
-    slug = re.sub(r"\.[a-z0-9]+$", "", slug, flags=re.I)
-    slug = re.sub(r"^\d+[-_]", "", slug)
-    slug = re.sub(r"[-_]\d+$", "", slug)
-    slug = re.sub(r"\d{4,}", "", slug)
-    slug = slug.replace("-", " ").replace("_", " ")
-    slug = clean_text(slug)
-    if not slug or slug.lower() in GENERIC_TITLES:
-        return ""
-    if not contains_job_title_word(slug):
-        return ""
-    return slug.title()
+    segments = [segment for segment in path.rstrip("/").split("/") if segment]
+    for raw_slug in reversed(segments):
+        slug = re.sub(r"\.[a-z0-9]+$", "", raw_slug, flags=re.I)
+        slug = re.sub(r"^\d+[-_]", "", slug)
+        slug = re.sub(r"[-_]\d+$", "", slug)
+        slug = re.sub(r"\d{4,}", "", slug)
+        slug = slug.replace("-", " ").replace("_", " ")
+        slug = clean_text(slug)
+        if not slug or slug.lower() in GENERIC_TITLES:
+            continue
+        if not contains_job_title_word(slug):
+            continue
+        return slug.title()
+    return ""
+
+
+def sanitize_job_title(title: str, url: str = "") -> str:
+    cleaned = clean_job_title(title)
+    if cleaned:
+        return cleaned
+    return title_from_slug(url)
 
 
 def tag_lines(tag: Any) -> List[str]:
@@ -882,7 +1034,7 @@ def title_from_anchor(anchor: Any, url: str) -> str:
             possible.append(line)
 
     for value in possible:
-        title = clean_job_title(value)
+        title = sanitize_job_title(value, url)
         if title and contains_job_title_word(title):
             return title
 
@@ -911,10 +1063,36 @@ def title_is_generic(title: str, company_name: str = "") -> bool:
         return True
     if title_l in GENERIC_CAREERS_TITLES:
         return True
-    if len(title_l.split()) == 1 and title_l in GENERIC_CAREERS_TITLES:
+    if len(title_l.split()) == 1 and (title_l in GENERIC_CAREERS_TITLES or contains_job_title_word(title_l)):
         return True
     company_l = clean_text(company_name).lower()
     return bool(company_l and title_l == company_l)
+
+
+def title_is_broad_opportunity_page(title: str, url: str = "") -> bool:
+    title_l = normalize_identity_part(title)
+    if not title_l:
+        return False
+    if title_l in {
+        "high school internship opportunities",
+        "explore internship opportunities",
+        "internship opportunities",
+        "internship program",
+        "student opportunities",
+        "student programs",
+        "early careers",
+        "early talent and internships",
+        "students early careers",
+        "new grads",
+        "graduate opportunities",
+    }:
+        return True
+    if "opportunit" in title_l and not url_has_job_detail_id(url):
+        return True
+    if BROAD_OPPORTUNITY_TITLE_RE.search(title_l) and not (url_has_job_detail_id(url) or is_ats_url(url)):
+        role_words = [word for word in ("engineer", "manager", "analyst", "technician", "scientist", "operator") if word in title_l]
+        return len(role_words) == 0
+    return False
 
 
 def title_has_negative_page_signal(title: str) -> bool:
@@ -1001,7 +1179,7 @@ def calculate_job_confidence(candidate: Dict[str, Any]) -> Tuple[int, List[str]]
     if has_application_signal(context_text):
         score += 1
         reasons.append("application_context")
-    if location:
+    if is_valid_location_text(location):
         score += 1
         reasons.append("location_detected")
     if is_ats_url(url) and url_has_job_path(url):
@@ -1011,6 +1189,9 @@ def calculate_job_confidence(candidate: Dict[str, Any]) -> Tuple[int, List[str]]
     if title_is_generic(title, company_name):
         score -= 2
         reasons.append("generic_title")
+    if title_is_broad_opportunity_page(title, url):
+        score -= 2
+        reasons.append("broad_opportunity_page")
     if has_negative_page_signal(title, url):
         score -= 2
         reasons.append("negative_page_keyword")
@@ -1024,12 +1205,21 @@ def calculate_job_confidence(candidate: Dict[str, Any]) -> Tuple[int, List[str]]
 def is_valid_job_posting(candidate: Dict[str, Any]) -> bool:
     if candidate.get("job_url"):
         candidate["job_url"] = canonicalize_url(candidate.get("job_url", ""))
+    sanitized_title = sanitize_job_title(candidate.get("job_title", ""), candidate.get("job_url", ""))
+    if sanitized_title:
+        candidate["job_title"] = sanitized_title
     score, reasons = calculate_job_confidence(candidate)
     candidate["job_confidence_score"] = str(score)
     candidate["rejection_reason"] = ";".join(reasons)
 
     if title_is_generic(candidate.get("job_title", ""), candidate.get("company_name", "")):
         candidate["rejection_reason"] = "generic_title"
+        return False
+    if title_is_broad_opportunity_page(
+        candidate.get("job_title", ""),
+        canonicalize_url(candidate.get("job_url", "")),
+    ):
+        candidate["rejection_reason"] = "broad_opportunity_page"
         return False
     if has_negative_page_signal(
         candidate.get("job_title", ""),
@@ -1145,13 +1335,15 @@ def extract_location(lines: List[str]) -> str:
     joined = " | ".join(lines[:12])
     match = re.search(r"\b(?:location|locations|city|office)\s*[:\-]\s*([^|]{2,90})", joined, re.I)
     if match:
-        return clean_text(match.group(1))
+        location = clean_text(match.group(1))
+        if is_valid_location_text(location):
+            return location
 
     for line in lines[:8]:
         line_l = line.lower()
         if line_l in {"remote", "hybrid", "on-site", "onsite"}:
             return line
-        if "," in line and len(line) <= 80 and not looks_like_job_text(line):
+        if "," in line and len(line) <= 100 and not looks_like_job_text(line) and is_valid_location_text(line):
             return line
     return ""
 
